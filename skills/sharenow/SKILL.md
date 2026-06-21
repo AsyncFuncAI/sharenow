@@ -1,18 +1,16 @@
 ---
 name: sharenow
 description: >
-  sharenow lets agents publish websites and store private files in cloud
-  Drives. Use Sites to publish HTML, documents, images, PDFs, videos, and
-  static files to live URLs at {slug}.sharenow.today or custom domains. Use
-  Drives as private cloud folders where agents can store files (documents,
-  context, memory, plans, assets, media, research, code, and more), share them with
-  other agents, and continue across sessions and tools. Use when asked to
-  "publish this", "host this", "deploy this", "share this on the web", "make a
-  website", "put this online", "create a webpage", "generate a URL", "build a
-  chatbot", "save this to my Drive", "store this for later", "write this to
-  cloud storage", "share a folder with another agent", or "use my sharenow
-  Drive". Also use when asked to "password protect this site", "make this site
-  private", or "share this site with only certain people".
+  sharenow gives an agent a place to ship what it makes: a website, a document, a
+  folder of files. Publishing returns a live URL at {slug}.sharenow.today or a
+  custom domain; private work stays in cloud Drives that carry across sessions and
+  hand off to other agents through scoped tokens. Use when asked to "publish this",
+  "host this", "deploy this", "share this on the web", "make a website", "put this
+  online", "create a webpage", "generate a URL", "build a chatbot", "save this to
+  my Drive", "store this for later", "write this to cloud storage", "share a folder
+  with another agent", or "use my sharenow Drive". Also use when asked to "password
+  protect this site", "make this site private", or "share this site with only
+  certain people".
 ---
 
 # sharenow
