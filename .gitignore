@@ -1,0 +1,14 @@
+# OS cruft
+.DS_Store
+
+# Local sharenow state + credentials must never be committed (at any depth)
+**/.sharenow/
+*.credentials
+
+# Forward-looking guards for a public repo
+.env
+.env.*
+*.log
+*.key
+*.pem
+node_modules/
