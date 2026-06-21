@@ -1,7 +1,6 @@
 {
   "name": "sharenow",
   "version": "1.0.0",
-  "_comment": "version is the plugin-package version; the skill version is tracked separately in SKILL.md.",
   "description": "Publish websites and store private agent files.",
   "author": { "name": "ASYNCFUNC LLC" },
   "homepage": "https://sharenow.today",
