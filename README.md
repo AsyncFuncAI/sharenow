@@ -1,36 +1,47 @@
 <p align="center">
-  <img src="sharenow/assets/logo.svg" alt="sharenow" width="240" height="64">
+  <img src="assets/cube-banner.jpg" alt="sharenow" width="100%">
 </p>
 
 <h1 align="center">sharenow</h1>
 
 <p align="center">
-  <strong>Ship sites. Hold files. One command.</strong><br>
-  Publish a website or hand off a private file in one command, and it is live in seconds at <code>sharenow.today</code>.
+  <em>Hosting for the things your agent makes.</em>
+</p>
+
+<p align="center">
+  A site, a document, a folder of work. One command, and it is live in seconds at <code>sharenow.today</code>.
 </p>
 
 ---
 
-sharenow is a skill, not a dashboard. It turns "put this online" into a single
-script call your agent already knows how to make. Two capabilities, one install:
+There is a moment, right after an agent finishes something, where the work has
+nowhere to go. sharenow is the place it goes. Tell the agent to publish, and a
+file, a folder, an app, or a report becomes a URL someone can open. Tell it to
+keep something private, and that work persists in a Drive across sessions and
+tools, shared only with whom you choose.
+
+No dashboard. No console to learn. sharenow is a skill: a small set of scripts an
+agent reads once and then drives on its own.
+
+**Two capabilities, one install.**
 
 - **Sites.** Publish HTML, apps, documents, images, PDFs, and video to a live URL
-  at `{slug}.sharenow.today` (or your own domain). A three-step flow under the
-  hood, one command on the surface.
-- **Drives.** Keep private agent files in cloud folders that outlive a single
-  session: context, memory, plans, research, assets. Share them with another
-  agent through a scoped token, not a public link.
+  at `{slug}.sharenow.today`, or a domain of your own. Three steps underneath,
+  one command on the surface.
+- **Drives.** Hold private agent files in cloud folders that outlast a single
+  conversation: context, memory, plans, research, assets. Hand them to another
+  agent with a scoped token, never a public link.
 
-The skill ships three helpers your agent drives directly: `publish.sh` for Sites,
-`drive.sh` for Drives, and `account.sh` for everything else (Site Data, profiles,
-custom domains, handles, links, service variables, analytics, and key management).
+The skill carries three helpers the agent uses directly. `publish.sh` for Sites,
+`drive.sh` for Drives, and `account.sh` for the rest: Site Data, profiles, custom
+domains, handles, links, service variables, analytics, and key management.
 
 ## Install
 
-Pick the line that matches your agent. Every path installs the same skill and the
-same three scripts; only the destination differs.
+One skill, the same three scripts, wherever your agent lives. Choose the line
+that fits; only the destination changes.
 
-**Universal (recommended).** Works anywhere the `skills` CLI runs:
+**Universal (recommended).** Anywhere the `skills` CLI runs:
 
 ```bash
 npx skills add AsyncFuncAI/sharenow --skill sharenow -g
@@ -38,20 +49,20 @@ npx skills add AsyncFuncAI/sharenow --skill sharenow -g
 
 Drop the `-g` for a project-local, repo-pinned install.
 
-**Codex.** Clone this repo into your project; Codex picks up `.codex-plugin/plugin.json` automatically.
+**Codex.** Clone this repo into your project; Codex reads `.codex-plugin/plugin.json` on its own.
 
 ```bash
 git clone https://github.com/AsyncFuncAI/sharenow
 ```
 
-**Cursor.** Clone this repo into your project; Cursor picks up `.cursor-plugin/plugin.json` automatically.
+**Cursor.** Clone this repo into your project; Cursor reads `.cursor-plugin/plugin.json` on its own.
 
 ```bash
 git clone https://github.com/AsyncFuncAI/sharenow
 ```
 
 **Claude Code.** Copy the canonical skill into your skills directory. The
-`sharenow/.` form copies the contents, so a re-run updates in place instead of
+`sharenow/.` form copies the contents, so a re-run updates in place rather than
 nesting:
 
 ```bash
@@ -78,7 +89,7 @@ canonical skill into your OpenClaw skills location:
 mkdir -p <openclaw-skills-dir>/sharenow && cp -R sharenow/. <openclaw-skills-dir>/sharenow/
 ```
 
-**From a running sharenow instance.** Any sharenow server serves the skill over
+**From a running sharenow instance.** Any sharenow server hands the skill over
 HTTP:
 
 ```bash
@@ -89,14 +100,14 @@ curl -fsSL https://sharenow.today/install.sh | bash
 
 ```
 sharenow/
-├── SKILL.md            # the agent-facing skill manifest
-├── AGENTS.md           # operating guide for the agent
+├── SKILL.md            the agent-facing skill manifest
+├── AGENTS.md           the operating guide for the agent
 ├── assets/logo.svg
 └── scripts/
-    ├── publish.sh      # publish + update Sites (create -> upload -> finalize)
-    ├── drive.sh        # private Drive storage + scoped token sharing
-    └── account.sh      # Site Data, profiles, domains, handles, links,
-                        # variables, analytics, and API key management
+    ├── publish.sh      publish and update Sites (create, upload, finalize)
+    ├── drive.sh        private Drive storage and scoped-token sharing
+    └── account.sh      Site Data, profiles, domains, handles, links,
+                        variables, analytics, and API key management
 ```
 
 Every other install path in this repo (`skills/`, `hermes/`, the plugin
@@ -115,8 +126,8 @@ truth.
 
 ## For maintainers
 
-The skill lives once in `sharenow/`. Edit there, then regenerate the per-agent
-layouts and verify before pushing:
+The skill lives once, in `sharenow/`. Edit there, regenerate the per-agent
+layouts, and verify before pushing:
 
 ```bash
 scripts/build-layouts.sh        # regenerate skills/ + hermes/; sync the logo into
@@ -125,8 +136,8 @@ scripts/verify-package.sh       # gate: paths, layout sync, lint, exec bits,
                                 #       brand, manifest JSON, install-cmd consistency
 ```
 
-`build-layouts.sh --check` fails if any generated layout has drifted from the
-canonical source, so the copies can never silently fall out of sync.
+`build-layouts.sh --check` fails the moment a generated layout drifts from the
+canonical source, so the copies cannot quietly fall out of step.
 
 ## License
 
