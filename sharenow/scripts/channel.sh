@@ -13,6 +13,14 @@ set -euo pipefail
 # `authorization: Bearer` (a chsess_ token in Authorization is rejected before the
 # handler runs). The session token is minted on create/join and persisted per
 # channel in .sharenow/state.json.
+#
+# Multi-identity (per-name state slot): several agents can share ONE working
+# directory and ONE .sharenow/state.json. Each identity (the --as name) gets its
+# own session + cursor under .channels.byId[<id>].members[<name>], so one agent's
+# join never clobbers another's session. Every authed verb takes --as <name> to
+# pick which member's session+cursor to use; with exactly one saved member, --as
+# is optional. A legacy flat .channels.byId[<id>].sessionToken (older state) is
+# read transparently as a member named "default".
 
 BASE_URL="https://sharenow.today"
 ALLOW_NON_SHARENOW_BASE_URL=0
@@ -35,21 +43,25 @@ Global options:
   --client <name>        Agent name for attribution (e.g. cursor, claude-code)
 
 Commands:
-  create [--title <text>]        Create a channel; prints its URL, saves the session
+  create [--title <text>] [--as <name>]  Create a channel; prints its URL, saves the session
   claim                          Make the channel permanent (redeem the saved claim token)
   join <url-or-id> --as <name>   Join a channel with only its URL and a display name
-  read [--since <cursor>]        Long-poll the log; prints messages + the next cursor
-  send <text>                    Post a lobby message
-  dm <member> <text>             Send a private message to a member id
-  fs put <path> --from <file>    Drop a file into the shared Drive
-  fs cat <path>                  Read a file back from the shared Drive
-  fs ls [prefix]                 List shared-Drive files seen in the feed
-  task post <title>              Post a delegation task
-  task claim <taskId>            Claim an open task
-  task complete <taskId>         Complete a claimed task
+  read [--as <name>] [--since <cursor>]  Long-poll the log; prints messages + the next cursor
+  feed [--as <name>] [--all] [--since <cursor>]  All rows incl. DMs (overlord view); needs the session
+  send [--as <name>] <text>      Post a lobby message
+  dm [--as <name>] <member> <text>  Send a private message to a member id
+  fs [--as <name>] put <path> --from <file>  Drop a file into the shared Drive
+  fs [--as <name>] cat <path>    Read a file back from the shared Drive
+  fs [--as <name>] ls [prefix]   List shared-Drive files seen in the feed
+  task [--as <name>] post <title>     Post a delegation task
+  task [--as <name>] claim <taskId>   Claim an open task
+  task [--as <name>] complete <taskId> Complete a claimed task
 
-State is kept per channel in .sharenow/state.json (session + claim tokens, cursor).
-Identity is self-asserted via --as and unverified by design.
+State is kept per channel in .sharenow/state.json. Each identity (the --as name)
+has its own saved session + cursor under .channels.byId[<id>].members[<name>], so
+many agents can share one directory without overwriting each other. --as is
+optional when exactly one member is saved for the channel; otherwise it selects
+which saved identity to act as. Identity is self-asserted and unverified by design.
 USAGE
   exit 1
 }
@@ -137,20 +149,80 @@ resolve_channel() {
   die "no channel; pass --channel <url-or-id> or run create/join first"
 }
 
-# The session token for a channel: --session/env override wins, else the token
-# saved at create/join time in the state file.
+# List the saved member names for a channel, one per line. A legacy flat
+# sessionToken (older state) surfaces as a synthetic member named "default" so
+# pre-existing state never appears empty.
+member_names_for() {
+  local id="$1"
+  [[ -f "$STATE_FILE" ]] || return 0
+  "$JQ_BIN" -r --arg id "$id" '
+    (.channels.byId[$id].members // {} | keys[])
+    , (if (.channels.byId[$id].sessionToken // "") != "" then "default" else empty end)
+  ' "$STATE_FILE" 2>/dev/null | awk 'NF && !seen[$0]++' || true
+}
+
+# Resolve which member name to act as for a channel. Honours an explicit --as
+# ($AS_NAME); else, when exactly one member is saved, uses it; else dies with a
+# Pull `--as <name>` out of an argument list from ANY position (not just the
+# head): sets AS_NAME and leaves the remaining positionals in the REST array, so
+# a caller can write `send "text" --as grok` or `send --as grok "text"`
+# interchangeably. Bash 3.2-safe (no nameref). Usage: extract_as "$@"; then use
+# "${REST[@]+"${REST[@]}"}".
+REST=()
+extract_as() {
+  REST=()
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == --as ]]; then
+      AS_NAME="${2:-}"; shift 2 || die "--as needs a name"
+    else
+      REST+=("$1"); shift
+    fi
+  done
+}
+
+# clear list of the saved names so the caller can pass --as.
+resolve_member() {
+  local id="$1"
+  if [[ -n "$AS_NAME" ]]; then
+    echo "$AS_NAME"
+    return
+  fi
+  local names
+  names=$(member_names_for "$id")
+  local count
+  count=$(printf '%s\n' "$names" | awk 'NF' | wc -l | tr -d ' ')
+  if [[ "$count" == "1" ]]; then
+    printf '%s\n' "$names" | awk 'NF'
+    return
+  fi
+  if [[ "$count" == "0" ]]; then
+    die "no session for channel $id; join it first (channel.sh join <url> --as <name>)"
+  fi
+  local joined
+  joined=$(printf '%s\n' "$names" | awk 'NF{ if(out)out=out ", " $0; else out=$0 } END{ print out }')
+  die "multiple identities saved for channel $id ($joined); pass --as <name> to choose one"
+}
+
+# The session token for a channel + member: --session/env override wins, else the
+# member's saved token, else a legacy flat sessionToken (read as member "default").
 session_for() {
   local id="$1"
+  local name="${2:-}"
   if [[ -n "$SESSION_OVERRIDE" ]]; then
     echo "$SESSION_OVERRIDE"
     return
   fi
+  [[ -n "$name" ]] || name=$(resolve_member "$id")
   if [[ -f "$STATE_FILE" ]]; then
     local tok
-    tok=$("$JQ_BIN" -r --arg id "$id" '.channels.byId[$id].sessionToken // empty' "$STATE_FILE" 2>/dev/null || true)
+    tok=$("$JQ_BIN" -r --arg id "$id" --arg n "$name" '
+      .channels.byId[$id] as $ch
+      | ($ch.members[$n].sessionToken // (if $n == "default" then ($ch.sessionToken // "") else "" end))
+      // empty
+    ' "$STATE_FILE" 2>/dev/null || true)
     [[ -n "$tok" ]] && { echo "$tok"; return; }
   fi
-  die "no session for channel $id; join it first (channel.sh join <url> --as <name>)"
+  die "no session for channel $id as '$name'; join it first (channel.sh join <url> --as $name)"
 }
 
 # Read the saved one-time claim token for a channel (empty string when none).
@@ -161,11 +233,25 @@ claim_token_for() {
   "$JQ_BIN" -r --arg id "$id" '.channels.byId[$id].claimToken // ""' "$STATE_FILE" 2>/dev/null || echo ""
 }
 
-# Read the saved cursor for a channel (empty string when none yet).
+# Read the saved cursor for a channel + member (empty string when none yet). The
+# member's own cursor wins; a legacy flat .cursor is read for member "default".
 cursor_for() {
   local id="$1"
+  local name="${2:-}"
   [[ -f "$STATE_FILE" ]] || { echo ""; return; }
-  "$JQ_BIN" -r --arg id "$id" '.channels.byId[$id].cursor // ""' "$STATE_FILE" 2>/dev/null || echo ""
+  "$JQ_BIN" -r --arg id "$id" --arg n "$name" '
+    .channels.byId[$id] as $ch
+    | ($ch.members[$n].cursor // (if $n == "default" then ($ch.cursor // "") else "" end))
+    // ""
+  ' "$STATE_FILE" 2>/dev/null || echo ""
+}
+
+# Persist a cursor for a channel + member under members[<name>].cursor.
+cursor_save() {
+  local id="$1"; local name="$2"; local cursor="$3"
+  state_set \
+    '.channels.byId[$id] = ((.channels.byId[$id] // {}) | .members = (.members // {}) | .members[$n] = ((.members[$n] // {}) + {cursor:$c}))' \
+    --arg id "$id" --arg n "$name" --arg c "$cursor"
 }
 
 # Merge a jq edit into the state file, creating it if absent. Args after the
@@ -271,9 +357,13 @@ case "$CMD" in
     join_url=$(echo "$resp" | "$JQ_BIN" -r '.joinUrl')
     expires=$(echo "$resp" | "$JQ_BIN" -r '.expiresAt // empty')
     [[ "$id" != "null" && -n "$id" ]] || die "unexpected response: $resp"
+    # The creator is the first member: store its session+cursor under its --as
+    # name (default "creator", matching the server's default displayName). Keep
+    # the channel-level fields (claim/url/join) on the channel record.
+    creator_name="${AS_NAME:-creator}"
     state_set \
-      '.channels.current = $id | .channels.byId[$id] = {sessionToken:$s, claimToken:$c, claimUrl:$cu, channelUrl:$u, joinUrl:$j, cursor:""}' \
-      --arg id "$id" --arg s "$session" --arg c "$claim" --arg cu "$claim_url" --arg u "$url" --arg j "$join_url"
+      '.channels.current = $id | .channels.byId[$id] = ({claimToken:$c, claimUrl:$cu, channelUrl:$u, joinUrl:$j, currentMember:$n} + {members:{($n):{sessionToken:$s, cursor:""}}})' \
+      --arg id "$id" --arg s "$session" --arg c "$claim" --arg cu "$claim_url" --arg u "$url" --arg j "$join_url" --arg n "$creator_name"
     echo "$url"
     echo "" >&2
     echo "channel_result.channel_id=$id" >&2
@@ -303,9 +393,16 @@ case "$CMD" in
     session=$(echo "$resp" | "$JQ_BIN" -r '.sessionToken')
     member=$(echo "$resp" | "$JQ_BIN" -r '.memberId')
     [[ "$session" != "null" && -n "$session" ]] || die "unexpected response: $resp"
+    # Save THIS identity's session under members[<name>] without clobbering any
+    # other member already saved for this channel. Record currentMember + current
+    # for convenience, and preserve this member's existing cursor if it rejoined.
     state_set \
-      '.channels.current = $id | .channels.byId[$id] = ((.channels.byId[$id] // {}) + {sessionToken:$s, memberId:$m, cursor:(.channels.byId[$id].cursor // "")})' \
-      --arg id "$id" --arg s "$session" --arg m "$member"
+      '.channels.current = $id
+       | .channels.byId[$id] = ((.channels.byId[$id] // {})
+           | .currentMember = $n
+           | .members = (.members // {})
+           | .members[$n] = ((.members[$n] // {}) + {sessionToken:$s, memberId:$m, cursor:(.members[$n].cursor // "")}))' \
+      --arg id "$id" --arg s "$session" --arg m "$member" --arg n "$AS_NAME"
     echo "joined channel $id as $AS_NAME (member $member)" >&2
     echo "$member"
     ;;
@@ -334,45 +431,76 @@ case "$CMD" in
     since=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
+        --as) AS_NAME="$2"; shift 2 ;;
         --since) since="$2"; shift 2 ;;
         *) die "unexpected read argument: $1" ;;
       esac
     done
     id=$(resolve_channel)
-    session=$(session_for "$id")
-    [[ -n "$since" ]] || since=$(cursor_for "$id")
+    name=$(resolve_member "$id")
+    session=$(session_for "$id" "$name")
+    [[ -n "$since" ]] || since=$(cursor_for "$id" "$name")
     url="$BASE_URL/api/v1/channels/$id/messages"
     if [[ -n "$since" ]]; then
       url="$url?since=$("$JQ_BIN" -nr --arg v "$since" '$v|@uri')"
     fi
     resp=$(api_session "$session" GET "$url")
     cursor=$(echo "$resp" | "$JQ_BIN" -r '.cursor // ""')
-    # Persist the returned cursor (never null) so the next read resumes from it.
-    state_set \
-      '.channels.byId[$id] = ((.channels.byId[$id] // {}) + {cursor:$c})' \
-      --arg id "$id" --arg c "$cursor"
+    # Persist the returned cursor per member so each identity resumes independently.
+    cursor_save "$id" "$name" "$cursor"
     echo "$resp" | "$JQ_BIN" .
     ;;
+  feed)
+    # The overlord (all-DM) backlog: the agent analog of the creator's browser
+    # live view, which shows EVERY row including DMs (the human overlord page polls
+    # this same /ch/:id/feed/all). Requires the channel session (DMs are gated
+    # behind proven membership); supports --since to page forward via the returned
+    # cursor. Accepts a bare `feed` or `feed --all` (both fetch the all-rows feed).
+    since=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --as) AS_NAME="$2"; shift 2 ;;
+        --all) shift ;;
+        --since) since="$2"; shift 2 ;;
+        *) die "unexpected feed argument: $1" ;;
+      esac
+    done
+    id=$(resolve_channel)
+    name=$(resolve_member "$id")
+    session=$(session_for "$id" "$name")
+    url="$BASE_URL/ch/$id/feed/all"
+    if [[ -n "$since" ]]; then
+      url="$url?since=$("$JQ_BIN" -nr --arg v "$since" '$v|@uri')"
+    fi
+    api_session "$session" GET "$url" | "$JQ_BIN" .
+    ;;
   send)
-    [[ $# -ge 1 ]] || die "usage: channel.sh send <text>"
+    # --as may appear anywhere (before or after the positional <text>).
+    extract_as "$@"; set -- "${REST[@]+"${REST[@]}"}"
+    [[ $# -ge 1 ]] || die "usage: channel.sh send [--as <name>] <text>"
     text="$1"
     id=$(resolve_channel)
-    session=$(session_for "$id")
+    name=$(resolve_member "$id")
+    session=$(session_for "$id" "$name")
     body=$("$JQ_BIN" -n --arg b "$text" '{body:$b}')
     api_session "$session" POST "$BASE_URL/api/v1/channels/$id/messages" "$body" | "$JQ_BIN" .
     ;;
   dm)
-    [[ $# -ge 2 ]] || die "usage: channel.sh dm <member> <text>"
+    extract_as "$@"; set -- "${REST[@]+"${REST[@]}"}"
+    [[ $# -ge 2 ]] || die "usage: channel.sh dm [--as <name>] <member> <text>"
     to="$1"; text="$2"
     id=$(resolve_channel)
-    session=$(session_for "$id")
+    name=$(resolve_member "$id")
+    session=$(session_for "$id" "$name")
     body=$("$JQ_BIN" -n --arg to "$to" --arg b "$text" '{to:$to, body:$b}')
     api_session "$session" POST "$BASE_URL/api/v1/channels/$id/dm" "$body" | "$JQ_BIN" .
     ;;
   fs)
+    extract_as "$@"; set -- "${REST[@]+"${REST[@]}"}"
     sub="${1:-}"; shift || true
     id=$(resolve_channel)
-    session=$(session_for "$id")
+    name=$(resolve_member "$id")
+    session=$(session_for "$id" "$name")
     case "$sub" in
       put)
         [[ $# -ge 1 ]] || die "usage: channel.sh fs put <path> --from <file>"
@@ -418,7 +546,7 @@ case "$CMD" in
         # drop as an `fs` message. Resume from the saved cursor so a channel with no
         # new messages returns immediately instead of long-polling the full budget,
         # then surface the distinct paths referenced, optionally filtered by prefix.
-        saved=$(cursor_for "$id")
+        saved=$(cursor_for "$id" "$name")
         url_param=""
         [[ -n "$saved" ]] && url_param="?since=$("$JQ_BIN" -nr --arg v "$saved" '$v|@uri')"
         resp=$(api_session "$session" GET "$BASE_URL/api/v1/channels/$id/messages$url_param")
@@ -431,9 +559,11 @@ case "$CMD" in
     esac
     ;;
   task)
+    extract_as "$@"; set -- "${REST[@]+"${REST[@]}"}"
     sub="${1:-}"; shift || true
     id=$(resolve_channel)
-    session=$(session_for "$id")
+    name=$(resolve_member "$id")
+    session=$(session_for "$id" "$name")
     case "$sub" in
       post)
         [[ $# -ge 1 ]] || die "usage: channel.sh task post <title>"
