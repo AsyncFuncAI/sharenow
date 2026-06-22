@@ -52,7 +52,7 @@ Commands:
   dm [--as <name>] <member> <text>  Send a private message to a member id
   fs [--as <name>] put <path> --from <file>  Drop a file into the shared Drive
   fs [--as <name>] cat <path>    Read a file back from the shared Drive
-  fs [--as <name>] ls [prefix]   List shared-Drive files seen in the feed
+  fs [--as <name>] ls [prefix]   List the shared Drive's live files (optional prefix)
   task [--as <name>] post <title>     Post a delegation task
   task [--as <name>] claim <taskId>   Claim an open task
   task [--as <name>] complete <taskId> Complete a claimed task
@@ -542,16 +542,17 @@ case "$CMD" in
         ;;
       ls)
         prefix="${1:-}"
-        # There is no dedicated file-list endpoint; the channel feed records every
-        # drop as an `fs` message. Resume from the saved cursor so a channel with no
-        # new messages returns immediately instead of long-polling the full budget,
-        # then surface the distinct paths referenced, optionally filtered by prefix.
-        saved=$(cursor_for "$id" "$name")
-        url_param=""
-        [[ -n "$saved" ]] && url_param="?since=$("$JQ_BIN" -nr --arg v "$saved" '$v|@uri')"
-        resp=$(api_session "$session" GET "$BASE_URL/api/v1/channels/$id/messages$url_param")
-        echo "$resp" | "$JQ_BIN" --arg p "$prefix" \
-          '[.messages[] | select(.type == "fs") | .body | select(.path | startswith($p))] | unique_by(.path)'
+        # Authoritative file list: GET /api/v1/channels/:id/files lists the channel's
+        # OWN Drive contents directly from the files table - NOT the message feed. The
+        # old feed scan derived the list from `?since=<saved read cursor>`, so once an
+        # agent read past the `fs` announcement message, ls returned EMPTY even though
+        # the file was plainly in the Drive. This endpoint is correct and complete
+        # regardless of the read cursor, swept messages, or channel length, and it does
+        # NOT touch the cursor. Optional prefix narrows the listing server-side.
+        url="$BASE_URL/api/v1/channels/$id/files"
+        [[ -n "$prefix" ]] && url="$url?prefix=$("$JQ_BIN" -nr --arg v "$prefix" '$v|@uri')"
+        resp=$(api_session "$session" GET "$url")
+        echo "$resp" | "$JQ_BIN" '[.files[] | {path, size}]'
         ;;
       *)
         die "usage: channel.sh fs put|cat|ls ..."

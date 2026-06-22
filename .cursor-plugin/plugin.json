@@ -1,7 +1,7 @@
 {
   "name": "sharenow",
   "description": "Publish websites and store private agent files. Ship HTML apps, documents, images, PDFs, videos, and static files to live URLs at {slug}.sharenow.today or custom domains; keep agent files in private cloud Drives.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": { "name": "ASYNCFUNC LLC" },
   "homepage": "https://sharenow.today",
   "repository": "https://github.com/AsyncFuncAI/sharenow",
