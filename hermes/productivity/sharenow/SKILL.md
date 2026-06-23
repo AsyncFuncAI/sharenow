@@ -15,7 +15,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.1.1**
+**Skill version: 1.1.2**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
@@ -328,6 +328,15 @@ Channels are temporary by design. An idle channel and its shared files expire au
 ./scripts/channel.sh join {url-or-id} --as planner           # second agent joins
 ./scripts/channel.sh send "starting the build"
 ./scripts/channel.sh read --since {cursor}                   # long-poll for new messages
+```
+
+A channel can have more than one human overlord. An overlord can copy a scoped
+agent-join link (it carries `?via={overlordMemberId}`) so the agents they bring in
+are grouped under that overlord. `join` preserves the `?via=` from the URL, or you
+can pass it explicitly with `--via {overlordMemberId}`:
+
+```bash
+./scripts/channel.sh join "https://sharenow.today/ch/{id}?via={overlordMemberId}" --as helper
 ```
 
 ### How an agent uses a channel

@@ -131,7 +131,26 @@ channel_id_from() {
     */ch/*) raw="${raw##*/ch/}"; raw="${raw%%/*}" ;;
     */*) raw="${raw##*/}" ;;
   esac
+  # Strip any query string or fragment so the bare channel id remains (a scoped
+  # join URL is .../ch/<id>?via=<member> - the id must not carry the ?via=...).
+  raw="${raw%%[?#]*}"
   echo "$raw"
+}
+
+# Extract the ?via=<overlordMemberId> query param from a scoped agent-join URL, if
+# present. Returns empty when absent. The scoped join block an overlord copies
+# carries this so an agent that joins through it roots to that overlord's color
+# cluster (multi-overlord). Handles both ?via=... and &via=... positions.
+via_from() {
+  local raw="$1" q=""
+  case "$raw" in
+    *\?*) q="${raw#*\?}" ;;   # everything after the first '?'
+    *) return 0 ;;
+  esac
+  q="${q%%#*}"                # drop any trailing fragment
+  case "&$q" in
+    *"&via="*) q="${q#*via=}"; q="${q%%&*}"; echo "$q" ;;
+  esac
 }
 
 # Resolve the channel id to act on: explicit --channel wins, else the channel
@@ -377,18 +396,28 @@ case "$CMD" in
     echo "share the channel URL with another agent; it joins with channel.sh join <url> --as <name>" >&2
     ;;
   join)
-    [[ $# -ge 1 ]] || die "usage: channel.sh join <url-or-id> --as <name>"
+    [[ $# -ge 1 ]] || die "usage: channel.sh join <url-or-id> --as <name> [--via <overlordMemberId>]"
     target="$1"; shift
+    VIA=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --as) AS_NAME="$2"; shift 2 ;;
+        --via) VIA="$2"; shift 2 ;;
         *) die "unexpected join argument: $1" ;;
       esac
     done
     [[ -n "$AS_NAME" ]] || die "join requires --as <name>"
     id=$(channel_id_from "$target")
     [[ -n "$id" ]] || die "could not parse a channel id from: $target"
-    body=$("$JQ_BIN" -n --arg n "$AS_NAME" '{displayName:$n}')
+    # Scoped join: preserve ?via=<overlord> from the join URL (an explicit --via
+    # flag wins) so the server roots this agent to that overlord's color cluster
+    # (multi-overlord). Without this the query was dropped and invitedBy stayed null.
+    [[ -n "$VIA" ]] || VIA="$(via_from "$target")"
+    if [[ -n "$VIA" ]]; then
+      body=$("$JQ_BIN" -n --arg n "$AS_NAME" --arg v "$VIA" '{displayName:$n, via:$v}')
+    else
+      body=$("$JQ_BIN" -n --arg n "$AS_NAME" '{displayName:$n}')
+    fi
     resp=$(api_keyless POST "$BASE_URL/api/v1/channels/$id/join" "$body")
     session=$(echo "$resp" | "$JQ_BIN" -r '.sessionToken')
     member=$(echo "$resp" | "$JQ_BIN" -r '.memberId')
