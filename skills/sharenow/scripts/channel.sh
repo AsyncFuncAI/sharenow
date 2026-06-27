@@ -43,7 +43,7 @@ Global options:
   --client <name>        Agent name for attribution (e.g. cursor, claude-code)
 
 Commands:
-  create [--title <text>] [--as <name>]  Create a channel; prints its URL, saves the session
+  create [--title <text>] [--as <name>]  Create a channel; prints your overlord URL, saves the session
   claim                          Make the channel permanent (redeem the saved claim token)
   join <url-or-id> --as <name>   Join a channel with only its URL and a display name
   read [--as <name>] [--since <cursor>]  Long-poll the log; prints messages + the next cursor
@@ -370,6 +370,13 @@ case "$CMD" in
     resp=$(api_keyless POST "$BASE_URL/api/v1/channels" "$body")
     id=$(echo "$resp" | "$JQ_BIN" -r '.channelId')
     url=$(echo "$resp" | "$JQ_BIN" -r '.channelUrl')
+    # The creator's own owner link: the live view with the creator's session in the
+    # URL fragment, which unlocks overlord (owner) mode in the browser. This is what
+    # `create` returns on stdout - it is the creator's link, NOT the link to share
+    # with other agents (that is the bare channel URL below; the overlord URL would
+    # leak the creator's session). Falls back to the public URL on an older server.
+    overlord_url=$(echo "$resp" | "$JQ_BIN" -r '.overlordUrl // empty')
+    [[ -n "$overlord_url" ]] || overlord_url="$url"
     session=$(echo "$resp" | "$JQ_BIN" -r '.sessionToken')
     claim=$(echo "$resp" | "$JQ_BIN" -r '.claimToken // empty')
     claim_url=$(echo "$resp" | "$JQ_BIN" -r '.claimUrl // empty')
@@ -378,14 +385,15 @@ case "$CMD" in
     [[ "$id" != "null" && -n "$id" ]] || die "unexpected response: $resp"
     # The creator is the first member: store its session+cursor under its --as
     # name (default "creator", matching the server's default displayName). Keep
-    # the channel-level fields (claim/url/join) on the channel record.
+    # the channel-level fields (claim/url/join/overlord) on the channel record.
     creator_name="${AS_NAME:-creator}"
     state_set \
-      '.channels.current = $id | .channels.byId[$id] = ({claimToken:$c, claimUrl:$cu, channelUrl:$u, joinUrl:$j, currentMember:$n} + {members:{($n):{sessionToken:$s, cursor:""}}})' \
-      --arg id "$id" --arg s "$session" --arg c "$claim" --arg cu "$claim_url" --arg u "$url" --arg j "$join_url" --arg n "$creator_name"
-    echo "$url"
+      '.channels.current = $id | .channels.byId[$id] = ({claimToken:$c, claimUrl:$cu, channelUrl:$u, overlordUrl:$ou, joinUrl:$j, currentMember:$n} + {members:{($n):{sessionToken:$s, cursor:""}}})' \
+      --arg id "$id" --arg s "$session" --arg c "$claim" --arg cu "$claim_url" --arg u "$url" --arg ou "$overlord_url" --arg j "$join_url" --arg n "$creator_name"
+    echo "$overlord_url"
     echo "" >&2
     echo "channel_result.channel_id=$id" >&2
+    echo "channel_result.overlord_url=$overlord_url" >&2
     echo "channel_result.channel_url=$url" >&2
     echo "channel_result.join_url=$join_url" >&2
     echo "channel_result.expires_at=$expires" >&2
@@ -393,7 +401,8 @@ case "$CMD" in
     if [[ -n "$claim_url" && "$claim_url" == https://* ]]; then
       echo "claim URL (keeps the channel permanently): $claim_url" >&2
     fi
-    echo "share the channel URL with another agent; it joins with channel.sh join <url> --as <name>" >&2
+    echo "the printed URL is your overlord (owner) link - open it in a browser for owner mode" >&2
+    echo "share the channel URL ($url) with another agent; it joins with channel.sh join <url> --as <name>" >&2
     ;;
   join)
     [[ $# -ge 1 ]] || die "usage: channel.sh join <url-or-id> --as <name> [--via <overlordMemberId>]"

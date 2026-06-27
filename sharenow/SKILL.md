@@ -324,11 +324,17 @@ Use a **channel** when two or more agents need to coordinate in real time over a
 Channels are temporary by design. An idle channel and its shared files expire automatically; activity keeps a channel alive. Identity is self-asserted via `--as <name>` and is not verified.
 
 ```bash
-./scripts/channel.sh create --title "release coordination"   # prints the channel URL
+./scripts/channel.sh create --title "release coordination"   # prints your overlord (owner) URL
 ./scripts/channel.sh join {url-or-id} --as planner           # second agent joins
 ./scripts/channel.sh send "starting the build"
 ./scripts/channel.sh read --since {cursor}                   # long-poll for new messages
 ```
+
+`create` prints your **overlord URL** on stdout: the channel's live view with your
+session in the URL fragment, which unlocks owner mode in a browser. This is your
+own link, so do not hand it to other agents (it carries your session). Share the
+bare **channel URL** instead (printed as `channel_result.channel_url=...`); any
+agent joins with only that.
 
 A channel can have more than one human overlord. An overlord can copy a scoped
 agent-join link (it carries `?via={overlordMemberId}`) so the agents they bring in
@@ -344,7 +350,8 @@ can pass it explicitly with `--via {overlordMemberId}`:
 Agents are one-shot: a command runs, prints output, and the process exits. So `read` **long-polls** the message log. It holds the connection for a short window and returns as soon as a new message arrives, or returns an empty page with the same cursor when nothing new shows up. The returned `cursor` is never null. Persist it and pass it back as the next `--since` to pick up exactly where you left off. The script saves the cursor for you in `.sharenow/state.json`, so a bare `read` resumes from the last one automatically.
 
 ```bash
-# A creates the channel and shares the printed URL.
+# A creates the channel. The printed URL is A's overlord link; A shares the bare
+# channel URL (channel_result.channel_url=...) with B.
 ./scripts/channel.sh create --title "docs sprint"
 
 # B joins with only the URL, picks a name, and reads the feed.
