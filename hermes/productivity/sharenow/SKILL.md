@@ -18,7 +18,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.2.0**
+**Skill version: 1.3.0**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
@@ -451,12 +451,14 @@ Several agents can share one working directory and one `.sharenow/state.json`. E
 
 Give `kb.sh` a public GitHub repo URL and it spins up a temporary sandbox, clones the
 repo, and indexes it into a code graph (fast, no embeddings, low token cost). You then
-ask structural questions: list functions, search symbols, read real source, or run a
-graph query. The knowledge base is ephemeral, so it self-cleans when it goes idle.
+ask structural questions: overview the architecture, list and filter symbols, read real
+source, trace call paths, or run a graph query. The knowledge base is ephemeral, so it
+self-cleans when it goes idle.
 
 Use this when asked to "understand this repo", "index this codebase", "where is X
-defined", "what does function Y do", "show me the source of Z", or "give me a queryable
-map of this repository". It is keyless in v1: no API key is needed.
+defined", "what does function Y do", "who calls Z", "what would breaking change to Z
+affect", "show me the source of Z", "find dead code", or "give me a queryable map of
+this repository". It is keyless in v1: no API key is needed.
 
 The one-shot flow (create and wait until ready in a single command):
 
@@ -464,21 +466,46 @@ The one-shot flow (create and wait until ready in a single command):
 # open: create the KB and block until it is ready (prints the sessionId)
 scripts/kb.sh open https://github.com/pallets/click
 
+# orient first: languages, entry points, routes, hotspots, clusters
+scripts/kb.sh query architecture
+
 # list functions (structural metadata, not raw file dumps)
 scripts/kb.sh query search_graph --label Function --limit 20
 
-# search for a symbol by name
-scripts/kb.sh query search_code --pattern shell_complete
-
-# read the real source of a symbol (get it by its qualified_name first)
+# read the real source of a symbol (get its qualified_name from search_graph first)
 scripts/kb.sh source home-user-click.src.click.core.Command
 
-# run a graph query
-scripts/kb.sh query graph --query "MATCH (f:Function) RETURN f.name LIMIT 10"
+# trace who CALLS a function (inbound), two hops deep
+scripts/kb.sh query trace --function home-user-click.src.click.core.Command.main --direction inbound --depth 2
 
 # free the sandbox now (otherwise it expires on idle)
 scripts/kb.sh close
 ```
+
+### Which query tool to use
+
+Pick the tool by intent. Reach for the cheapest one that answers the question, and
+prefer the structural tools over a raw `graph` query.
+
+| You want to                                     | Tool           | Key flags |
+| ----------------------------------------------- | -------------- | --------- |
+| Get oriented in an unfamiliar repo (start here) | `architecture` | (none) |
+| See what node labels and edge types exist       | `schema`       | (none; run before `graph`) |
+| List or filter symbols by structure             | `search_graph` | `--label`, `--name <re>`, `--file <re>`, `--limit`, `--offset` |
+| Find dead code (unreferenced, non-entry)        | `search_graph` | `--max-degree 0 --exclude-entry-points` |
+| Find hotspots (most-connected symbols)          | `search_graph` | `--min-degree <n>` |
+| Grep for a string across the code               | `search_code`  | `--pattern <text>` |
+| Read the real source of a known symbol          | `source`       | `<qualified-name>` |
+| Trace call paths (callers or callees)           | `trace`        | `--function <qname>`, `--direction`, `--depth 1-5`, `--risk-labels` |
+| Run an arbitrary read-only graph query          | `graph`        | `--query "<cypher>"` (run `schema` first) |
+
+`trace --direction` takes `inbound` (who calls this), `outbound` (what this calls), or
+`both` (the default). `--risk-labels` tags each hop CRITICAL / HIGH / MEDIUM / LOW by
+distance, which is useful for impact analysis.
+
+A good default sweep for "understand this repo": run `architecture` to orient, `schema`
+to learn the labels, a few `search_graph` / `search_code` calls to locate the symbols
+you care about, then `source` and `trace` to go deep on them.
 
 The active session is remembered in `.sharenow/state.json` under `.kb.current`, so
 `status`, `query`, `source`, and `close` act on the last opened repo without repeating

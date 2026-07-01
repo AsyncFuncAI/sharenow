@@ -40,10 +40,16 @@ Commands:
   create <repo-url>                   Create only (do not wait); prints sessionId + state.
   status                              Print the current session's state (and project when ready).
   query <tool> [args]                 Run a query against the ready session. Tools + args:
-                                        search_graph  [--label <L>] [--name <regex>] [--limit <n>]
+                                        architecture                             orient: languages, entry points, routes, hotspots
+                                        schema                                   node labels + edge types (run before `graph`)
+                                        search_graph  [--label <L>] [--name <re>] [--file <re>]
+                                                      [--min-degree <n>] [--max-degree <n>]
+                                                      [--exclude-entry-points] [--limit <n>] [--offset <n>]
                                         search_code   --pattern <text>
-                                        source        --qualified-name <qname>   (get_code_snippet)
-                                        graph         --query "<cypher>"          (query_graph)
+                                        source        --qualified-name <qname>   read real source (get_code_snippet)
+                                        trace         --function <qname> [--direction inbound|outbound|both]
+                                                      [--depth 1-5] [--risk-labels]   call paths (trace_path)
+                                        graph         --query "<cypher>"          arbitrary read-only query (query_graph)
   source <qualified-name>             Shorthand for: query source --qualified-name <qname>
   close                               Delete the current session (frees the sandbox now).
 
@@ -155,23 +161,50 @@ require_session() {
 build_query_body() {
   local tool="$1"; shift
   local label="" name="" limit="" pattern="" qname="" cypher=""
+  local file="" offset="" min_degree="" max_degree="" exclude_entry_points=""
+  local function_name="" direction="" depth="" risk_labels=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --label) label="$2"; shift 2 ;;
       --name) name="$2"; shift 2 ;;
       --limit) limit="$2"; shift 2 ;;
+      --offset) offset="$2"; shift 2 ;;
+      --file) file="$2"; shift 2 ;;
+      --min-degree) min_degree="$2"; shift 2 ;;
+      --max-degree) max_degree="$2"; shift 2 ;;
+      --exclude-entry-points) exclude_entry_points=true; shift ;;
       --pattern) pattern="$2"; shift 2 ;;
       --qualified-name) qname="$2"; shift 2 ;;
       --query) cypher="$2"; shift 2 ;;
+      --function) function_name="$2"; shift 2 ;;
+      --direction) direction="$2"; shift 2 ;;
+      --depth) depth="$2"; shift 2 ;;
+      --risk-labels) risk_labels=true; shift ;;
       *) die "unknown query option: $1" ;;
     esac
   done
+  # The args object uses the SERVER's camelCase KbQueryArgs keys (namePattern,
+  # filePattern, ...); the server maps them to cbmem's snake_case. Do NOT emit
+  # snake_case here or the server drops the filter.
   case "$tool" in
     search_graph)
-      # NOTE: bind to $lbl/$nm/$lim, NOT $label - `label` is a reserved jq keyword
-      # and a `$label` variable fails to compile. The object KEY `label:` is fine.
-      "$JQ_BIN" -nc --arg lbl "$label" --arg nm "$name" --arg lim "$limit" \
-        '{tool:"search_graph", args:( {} + (if $lbl!="" then {label:$lbl} else {} end) + (if $nm!="" then {name_pattern:$nm} else {} end) + (if $lim!="" then {limit:($lim|tonumber)} else {} end) )}'
+      # NOTE: bind to $lbl/$nm/$lim (etc.), NOT $label - `label` is a reserved jq
+      # keyword and a `$label` variable fails to compile. Object KEYS are unaffected.
+      # Degree is TWO ints (minDegree/maxDegree), NOT a degree_filters object.
+      "$JQ_BIN" -nc \
+        --arg lbl "$label" --arg nm "$name" --arg lim "$limit" \
+        --arg fp "$file" --arg off "$offset" \
+        --arg mnd "$min_degree" --arg mxd "$max_degree" \
+        --argjson xep "${exclude_entry_points:-false}" \
+        '{tool:"search_graph", args:( {}
+           + (if $lbl!="" then {label:$lbl} else {} end)
+           + (if $nm!="" then {namePattern:$nm} else {} end)
+           + (if $fp!="" then {filePattern:$fp} else {} end)
+           + (if $mnd!="" then {minDegree:($mnd|tonumber)} else {} end)
+           + (if $mxd!="" then {maxDegree:($mxd|tonumber)} else {} end)
+           + (if $xep then {excludeEntryPoints:true} else {} end)
+           + (if $lim!="" then {limit:($lim|tonumber)} else {} end)
+           + (if $off!="" then {offset:($off|tonumber)} else {} end) )}'
       ;;
     search_code)
       [[ -n "$pattern" ]] || die "search_code requires --pattern"
@@ -185,7 +218,24 @@ build_query_body() {
       [[ -n "$cypher" ]] || die "graph requires --query"
       "$JQ_BIN" -nc --arg q "$cypher" '{tool:"query_graph", args:{query:$q}}'
       ;;
-    *) die "unknown tool: $tool (use search_graph|search_code|source|graph)" ;;
+    architecture)
+      # Project-only: the server injects the project, so there are no client args.
+      "$JQ_BIN" -nc '{tool:"get_architecture", args:{}}'
+      ;;
+    schema)
+      "$JQ_BIN" -nc '{tool:"get_graph_schema", args:{}}'
+      ;;
+    trace)
+      [[ -n "$function_name" ]] || die "trace requires --function"
+      "$JQ_BIN" -nc \
+        --arg fn "$function_name" --arg dir "$direction" --arg dep "$depth" \
+        --argjson risk "${risk_labels:-false}" \
+        '{tool:"trace_path", args:( {functionName:$fn}
+           + (if $dir!="" then {direction:$dir} else {} end)
+           + (if $dep!="" then {depth:($dep|tonumber)} else {} end)
+           + (if $risk then {riskLabels:true} else {} end) )}'
+      ;;
+    *) die "unknown tool: $tool (use search_graph|search_code|source|graph|architecture|schema|trace)" ;;
   esac
 }
 
@@ -268,7 +318,7 @@ cmd_open() {
 }
 
 cmd_query() {
-  [[ $# -ge 1 ]] || die "query requires a tool (search_graph|search_code|source|graph)"
+  [[ $# -ge 1 ]] || die "query requires a tool (architecture|schema|search_graph|search_code|source|trace|graph)"
   local tool="$1"; shift
   local sid body resp
   sid="$(require_session)"
