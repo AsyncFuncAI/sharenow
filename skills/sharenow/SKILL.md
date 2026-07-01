@@ -10,12 +10,15 @@ description: >
   my Drive", "store this for later", "write this to cloud storage", "share a folder
   with another agent", or "use my sharenow Drive". Also use when asked to "password
   protect this site", "make this site private", or "share this site with only
-  certain people".
+  certain people". Also gives an agent a queryable knowledge base of any public
+  GitHub repo: use when asked to "understand this repo", "index this codebase",
+  "where is X defined", "what does function Y do", "show me the source of Z", or
+  "give me a queryable map of this repository".
 ---
 
 # sharenow
 
-**Skill version: 1.1.2**
+**Skill version: 1.2.0**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
@@ -440,6 +443,56 @@ Several agents can share one working directory and one `.sharenow/state.json`. E
 | `--channel {url-or-id}`          | Channel to act on (default: last created or joined) |
 | `--as {name}`                    | Which saved identity to act as (optional with one saved member) |
 | `--session {chsess_...}`         | Session token override (or `$SHARENOW_CHANNEL_SESSION`) |
+| `--client {name}`                | Agent name for attribution (e.g. `cursor`)          |
+| `--base-url {url}`               | API base URL (default: `https://sharenow.today`) |
+| `--allow-nonsharenow-base-url`   | Allow talking to a non-default `--base-url`         |
+
+## Codebase knowledge base (query any GitHub repo)
+
+Give `kb.sh` a public GitHub repo URL and it spins up a temporary sandbox, clones the
+repo, and indexes it into a code graph (fast, no embeddings, low token cost). You then
+ask structural questions: list functions, search symbols, read real source, or run a
+graph query. The knowledge base is ephemeral, so it self-cleans when it goes idle.
+
+Use this when asked to "understand this repo", "index this codebase", "where is X
+defined", "what does function Y do", "show me the source of Z", or "give me a queryable
+map of this repository". It is keyless in v1: no API key is needed.
+
+The one-shot flow (create and wait until ready in a single command):
+
+```bash
+# open: create the KB and block until it is ready (prints the sessionId)
+scripts/kb.sh open https://github.com/pallets/click
+
+# list functions (structural metadata, not raw file dumps)
+scripts/kb.sh query search_graph --label Function --limit 20
+
+# search for a symbol by name
+scripts/kb.sh query search_code --pattern shell_complete
+
+# read the real source of a symbol (get it by its qualified_name first)
+scripts/kb.sh source home-user-click.src.click.core.Command
+
+# run a graph query
+scripts/kb.sh query graph --query "MATCH (f:Function) RETURN f.name LIMIT 10"
+
+# free the sandbox now (otherwise it expires on idle)
+scripts/kb.sh close
+```
+
+The active session is remembered in `.sharenow/state.json` under `.kb.current`, so
+`status`, `query`, `source`, and `close` act on the last opened repo without repeating
+the id. Target a specific one with `--session {kb_...}` (or `$SHARENOW_KB_SESSION`).
+
+Only public `https://github.com/{owner}/{repo}` URLs are accepted in v1. Each open KB
+holds a live sandbox that costs real compute, so `close` when you are done (or let it
+expire). Results are the code-graph engine's JSON, returned under `.result`.
+
+### kb.sh options
+
+| Flag                             | Description                                          |
+| -------------------------------- | --------------------------------------------------- |
+| `--session {kb_...}`             | Session id override (or `$SHARENOW_KB_SESSION`)      |
 | `--client {name}`                | Agent name for attribution (e.g. `cursor`)          |
 | `--base-url {url}`               | API base URL (default: `https://sharenow.today`) |
 | `--allow-nonsharenow-base-url`   | Allow talking to a non-default `--base-url`         |

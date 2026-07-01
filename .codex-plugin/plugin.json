@@ -1,12 +1,22 @@
 {
   "name": "sharenow",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Publish websites and store private agent files.",
-  "author": { "name": "ASYNCFUNC LLC" },
+  "author": {
+    "name": "ASYNCFUNC LLC"
+  },
   "homepage": "https://sharenow.today",
   "repository": "https://github.com/AsyncFuncAI/sharenow",
   "license": "MIT",
-  "keywords": ["sharenow", "publish", "static-hosting", "deploy", "share", "drive", "storage"],
+  "keywords": [
+    "sharenow",
+    "publish",
+    "static-hosting",
+    "deploy",
+    "share",
+    "drive",
+    "storage"
+  ],
   "interface": {
     "displayName": "sharenow",
     "shortDescription": "Publish websites and store private agent files.",
