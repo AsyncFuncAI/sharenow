@@ -55,6 +55,11 @@ Commands:
                                                       [--depth 1-5] [--risk-labels]   call paths (trace_path)
                                         graph         --query "<cypher>"          arbitrary read-only query (query_graph)
   source <qualified-name>             Shorthand for: query source --qualified-name <qname>
+  cat <path> [--from <n>] [--to <n>]  Read a raw file from the indexed repo by its
+                                      repo-relative path (configs, READMEs, module
+                                      top-level code that has no symbol). Output is
+                                      capped at 64KB; page big files with --from/--to
+                                      (1-based lines). Prefer `source` for symbols.
   close                               Delete the current session (frees the sandbox now).
 
 The active session is remembered in .sharenow/state.json under .kb.current, so
@@ -487,6 +492,36 @@ cmd_source() {
   cmd_query source --qualified-name "$1"
 }
 
+# Read a raw file from the indexed repo (POST /:id/file). Prints the CONTENT raw
+# on stdout (not JSON) so it pipes like cat; a truncation warning goes to stderr.
+# The path is repo-relative; --from/--to are 1-based line numbers (either alone
+# is an open range). Symbol reads should keep using `source` - this is the
+# escape hatch for files the code graph has no symbol for.
+cmd_cat() {
+  [[ $# -ge 1 ]] || die "cat requires a repo-relative file path"
+  local path="$1"; shift
+  local from="" to=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from) from="$2"; shift 2 ;;
+      --to) to="$2"; shift 2 ;;
+      *) die "unknown cat option: $1 (use --from <n> / --to <n>)" ;;
+    esac
+  done
+  local sid body resp
+  sid="$(require_session)"
+  body=$("$JQ_BIN" -nc --arg p "$path" --arg f "$from" --arg t "$to" \
+    '{path:$p}
+     + (if $f!="" then {startLine:($f|tonumber)} else {} end)
+     + (if $t!="" then {endLine:($t|tonumber)} else {} end)')
+  resp=$(api POST "$BASE_URL/api/v1/kb/$sid/file" "$body")
+  if [[ "$(echo "$resp" | "$JQ_BIN" -r '.result.truncated')" == "true" ]]; then
+    echo "warning: output truncated at 64KB; page with --from/--to" >&2
+  fi
+  # -j prints the string raw with NO added trailing newline (content is verbatim).
+  echo "$resp" | "$JQ_BIN" -j '.result.content'
+}
+
 cmd_close() {
   local sid resp
   sid="$(require_session)"
@@ -500,6 +535,7 @@ case "$COMMAND" in
   status) cmd_status "$@" ;;
   query)  cmd_query "$@" ;;
   source) cmd_source "$@" ;;
+  cat)    cmd_cat "$@" ;;
   close)  cmd_close "$@" ;;
   *) die "unknown command: $COMMAND (see: kb.sh --help)" ;;
 esac

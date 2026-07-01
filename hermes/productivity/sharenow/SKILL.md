@@ -482,6 +482,10 @@ scripts/kb.sh source home-user-click.src.click.core.Command
 # trace who CALLS a function (inbound), two hops deep
 scripts/kb.sh query trace --function home-user-click.src.click.core.Command.main --direction inbound --depth 2
 
+# read a file the graph has no symbol for (config, README, module top-level)
+scripts/kb.sh cat pyproject.toml
+scripts/kb.sh cat src/click/core.py --from 1 --to 40
+
 # free the sandbox now (otherwise it expires on idle)
 scripts/kb.sh close
 ```
@@ -500,6 +504,7 @@ prefer the structural tools over a raw `graph` query.
 | Find hotspots (most-connected symbols)          | `search_graph` | `--min-degree <n>` |
 | Grep for a string across the code               | `search_code`  | `--pattern <text>` |
 | Read the real source of a known symbol          | `source`       | `<qualified-name>` |
+| Read a file that is NOT a symbol (config, README, script, module top-level, a line range) | `cat` | `<path>`, `--from <n>`, `--to <n>` |
 | Trace call paths (callers or callees)           | `trace`        | `--function <qname>`, `--direction`, `--depth 1-5`, `--risk-labels` |
 | Run an arbitrary read-only graph query          | `graph`        | `--query "<cypher>"` (run `schema` first) |
 
@@ -507,13 +512,23 @@ prefer the structural tools over a raw `graph` query.
 `both` (the default). `--risk-labels` tags each hop CRITICAL / HIGH / MEDIUM / LOW by
 distance, which is useful for impact analysis.
 
+`cat` is the ground-truth escape hatch: the code graph only indexes symbols, so
+package manifests, configs, READMEs, shell scripts, and module top-level code are
+not reachable via `source` - `cat` reads them by repo-relative path (`cat` is a
+top-level verb, not a query tool: `kb.sh cat package.json`, not `kb.sh query cat`).
+Output is capped at 64KB with a truncation warning on stderr; page a big file with
+`--from`/`--to` (1-based lines) instead of dumping it whole. Prefer `source` when
+the thing you want IS a symbol - it returns exactly the definition, with structural
+metadata.
+
 A good default sweep for "understand this repo": run `architecture` to orient, `schema`
 to learn the labels, a few `search_graph` / `search_code` calls to locate the symbols
-you care about, then `source` and `trace` to go deep on them.
+you care about, then `source` / `trace` to go deep on them, and `cat` for the
+manifests and configs the graph does not index.
 
 The active session is remembered in `.sharenow/state.json` under `.kb.current`, so
-`status`, `query`, `source`, and `close` act on the last opened repo without repeating
-the id. Target a specific one with `--session {kb_...}` (or `$SHARENOW_KB_SESSION`).
+`status`, `query`, `source`, `cat`, and `close` act on the last opened repo without
+repeating the id. Target a specific one with `--session {kb_...}` (or `$SHARENOW_KB_SESSION`).
 
 URL targets must be public `https://github.com/{owner}/{repo}` URLs in v1. A local
 directory target is tarred client-side and uploaded: inside a git work tree the archive
