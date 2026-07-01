@@ -2,17 +2,19 @@
 set -euo pipefail
 
 # sharenow kb.sh: an agent-facing CLI for ephemeral codebase knowledge bases.
-# Give it a public GitHub repo URL and it spins up a sandbox, clones the repo,
+# Give it a public GitHub repo URL, or a local directory path, and it spins up a
+# sandbox, materializes the code (git clone, or a gitignore-aware tar upload),
 # indexes it with a fast code-graph engine (no embeddings), and answers structural
 # queries in milliseconds: list functions, search symbols, read real source, or run
 # a graph query. The knowledge base is temporary and self-cleans when it goes idle.
 #
 # Auth model: KEYLESS in v1 (no API key needed). Each session is created from a
-# repo URL and identified by its sessionId, persisted in .sharenow/state.json so
-# later commands find the live session without re-passing the id.
+# repo URL or local path and identified by its sessionId, persisted in
+# .sharenow/state.json so later commands find the live session without
+# re-passing the id.
 #
 # Typical flow (one command does create + wait):
-#   kb.sh open https://github.com/pallets/click
+#   kb.sh open https://github.com/pallets/click   # or: kb.sh open .
 #   kb.sh query search_graph --label Function --limit 10
 #   kb.sh source home-user-click.src.click.core.Command
 #   kb.sh close
@@ -34,10 +36,12 @@ Global options:
   --client <name>        Agent name for attribution (e.g. cursor, claude-code)
 
 Commands:
-  open <repo-url> [--timeout <sec>]   Create a KB from a public GitHub URL and wait
-                                      until it is ready (default timeout 60s). Prints
-                                      the sessionId + project and saves the session.
-  create <repo-url>                   Create only (do not wait); prints sessionId + state.
+  open <repo-url|path> [--timeout <sec>]
+                                      Create a KB from a public GitHub URL or a local
+                                      directory (e.g. `.`) and wait until it is ready
+                                      (default timeout 60s). Prints the sessionId +
+                                      project and saves the session.
+  create <repo-url|path>              Create only (do not wait); prints sessionId + state.
   status                              Print the current session's state (and project when ready).
   query <tool> [args]                 Run a query against the ready session. Tools + args:
                                         architecture                             orient: languages, entry points, routes, hotspots
@@ -55,7 +59,9 @@ Commands:
 
 The active session is remembered in .sharenow/state.json under .kb.current, so
 status/query/source/close act on the last opened KB without repeating the id. Use
---session to target a specific one. Only public https github.com repos are accepted.
+--session to target a specific one. URL targets must be public https github.com
+repos; a local directory is tarred client-side (gitignore-aware inside a git work
+tree) and uploaded, capped at 32MiB compressed.
 USAGE
   exit 1
 }
@@ -149,10 +155,31 @@ api() {
   rm -f "$tmp"
 }
 
+# Raw-body variant of api(): POSTs a file's bytes verbatim (application/gzip),
+# used only by the local-directory upload. Same non-2xx handling as api(), so a
+# server-side 413/400 surfaces its JSON `.error` cleanly.
+api_upload_gzip() {
+  local url="$1" file="$2"
+  local tmp code
+  tmp=$(mktemp)
+  code=$(curl -sS -o "$tmp" -w "%{http_code}" -X POST "$url" \
+    "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
+    -H "content-type: application/gzip" --data-binary "@$file")
+  if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
+    local err
+    err=$("$JQ_BIN" -r '.error // .message // empty' "$tmp" 2>/dev/null || true)
+    [[ -n "$err" ]] || err="$(cat "$tmp")"
+    rm -f "$tmp"
+    die "HTTP $code: $err"
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
 require_session() {
   local sid
   sid="$(current_session)"
-  [[ -n "$sid" ]] || die "no active KB session (run: kb.sh open <repo-url>)"
+  [[ -n "$sid" ]] || die "no active KB session (run: kb.sh open <repo-url|path>)"
   echo "$sid"
 }
 
@@ -247,17 +274,145 @@ assert_github_url() {
     || die "only public https://github.com/<owner>/<repo> URLs are accepted (got: $url)"
 }
 
+# ── Local-directory targets (v1.2) ─────────────────────────────────────────────
+# open/create accept a local directory as well as a GitHub URL: the client tars
+# the directory (gitignore-aware inside a git work tree), size-checks it, and
+# POSTs the gzipped archive as a raw body to /api/v1/kb/local. From the 202 on,
+# the lifecycle (status/query/source/close) is identical to the GitHub flow.
+
+# Client-side mirror of the server's upload cap (32MiB compressed). The server
+# cap is authoritative; this mirror just turns an oversize directory into a fast
+# local error instead of a 413 after shipping the whole archive.
+UPLOAD_MAX_BYTES=33554432
+
+# The archive (and the file-list scratch) are built into mktemp files; the EXIT
+# trap guarantees cleanup on every path (success, die, signal). Written `-z || rm`
+# so the trap body itself can never fail and mask the script's real exit status
+# under set -e.
+ARCHIVE_TMP=""
+LIST_TMP=""
+cleanup_archive() {
+  [[ -z "$ARCHIVE_TMP" ]] || rm -f "$ARCHIVE_TMP"
+  [[ -z "$LIST_TMP" ]] || rm -f "$LIST_TMP"
+}
+trap cleanup_archive EXIT
+
+# Sanitize a directory basename into the server's name charset ([A-Za-z0-9._-],
+# max 64 chars). The name is only a directory label inside the per-session
+# sandbox, so lossy is fine: every out-of-charset byte becomes `-`, and an
+# empty or dot-only result falls back to `workspace` (the server's own default).
+sanitize_project_name() {
+  local name
+  name=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-64)
+  if [[ -z "$name" || "$name" == "." || "$name" == ".." ]]; then name="workspace"; fi
+  printf '%s' "$name"
+}
+
+# Build the gzipped tar of a local directory into ARCHIVE_TMP. Inside a git work
+# tree: tracked + untracked-unignored files (`git ls-files -co
+# --exclude-standard`), which respects .gitignore and never ships `.git` itself,
+# matching what "index my current directory" means. Outside git: plain tar with
+# conservative default excludes for the usual dependency/build dirs. NUL
+# delimiting keeps filenames with spaces intact, and the flag set (`--null -T`)
+# works on both bsdtar (macOS) and GNU tar (Linux agents); with `--null`, GNU
+# tar also reads dash-leading names verbatim instead of as options.
+# COPYFILE_DISABLE stops macOS bsdtar from injecting AppleDouble `._*` metadata
+# entries (junk files in the sandbox index); GNU tar ignores it harmlessly.
+#
+# The ls-files output is FILTERED into LIST_TMP before tar sees it, because git
+# reads the INDEX, not the disk: (a) a tracked file whose working-tree copy was
+# deleted (an unstaged deletion, an everyday mid-refactor state) is still emitted,
+# and tar would abort the whole open on the missing path; (b) an initialized
+# submodule is emitted as ONE gitlink directory entry, and tar -T would recurse
+# the entire checkout, shipping the submodule's .git pointer and its
+# own-gitignored files (.env, node_modules), breaking the gitignore promise. So:
+# keep regular files and symlinks that still exist, drop real directories
+# (gitlinks; submodules are deliberately not indexed) and vanished paths. The
+# if/elif shape keeps every loop iteration exiting 0 under set -euo pipefail.
+build_local_archive() {
+  local dir="$1"
+  ARCHIVE_TMP=$(mktemp "${TMPDIR:-/tmp}/sharenow-kb.XXXXXX")
+  if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    LIST_TMP=$(mktemp "${TMPDIR:-/tmp}/sharenow-kb-list.XXXXXX")
+    (cd "$dir" && git ls-files -co --exclude-standard -z) \
+      | while IFS= read -r -d '' f; do
+          if [[ -d "$dir/$f" && ! -L "$dir/$f" ]]; then
+            : # gitlink (submodule) directory, excluded from the archive
+          elif [[ -e "$dir/$f" || -L "$dir/$f" ]]; then
+            printf '%s\0' "$f"
+          fi
+        done > "$LIST_TMP"
+    # Fail fast on nothing-to-index (empty dir / everything gitignored): bsdtar
+    # would silently build an empty archive (a "ready" KB with nothing in it)
+    # while GNU tar aborts with a cryptic "cowardly refusing"; neither helps.
+    [[ -s "$LIST_TMP" ]] || die "nothing to index in $dir (empty, or everything gitignored?)"
+    (cd "$dir" && COPYFILE_DISABLE=1 tar --null -czf "$ARCHIVE_TMP" -T "$LIST_TMP")
+  else
+    COPYFILE_DISABLE=1 tar -czf "$ARCHIVE_TMP" \
+      --exclude .git --exclude node_modules --exclude dist \
+      --exclude build --exclude .next --exclude target \
+      -C "$dir" .
+  fi
+}
+
+# Source-detect an open/create target and stage the request. A URL keeps the v1
+# GitHub path byte-identically; anything else must be an existing local
+# directory. Sets (in the parent shell, so callers must NOT run this inside a
+# command substitution):
+#   TARGET_KIND   github | local
+#   TARGET_LABEL  what save_current_session records: the URL verbatim, or
+#                 local:<abs-path> (mirrors the server's repoUrl label)
+#   TARGET_NAME   (local only) the sanitized project name sent as ?name=
+#   ARCHIVE_TMP   (local only) the built, size-checked archive
+TARGET_KIND=""
+TARGET_LABEL=""
+TARGET_NAME=""
+resolve_target() {
+  local target="$1"
+  if [[ "$target" =~ ^https?:// ]]; then
+    assert_github_url "$target"
+    TARGET_KIND="github"
+    TARGET_LABEL="$target"
+    return
+  fi
+  [[ -d "$target" ]] || die "not a directory: $target (open takes a public GitHub URL or an existing local directory)"
+  # Resolve to an absolute path so the saved label is stable regardless of where
+  # later commands run from.
+  local abs size
+  abs=$(cd "$target" && pwd)
+  TARGET_KIND="local"
+  TARGET_LABEL="local:$abs"
+  TARGET_NAME=$(sanitize_project_name "$(basename "$abs")")
+  build_local_archive "$abs"
+  size=$(wc -c < "$ARCHIVE_TMP" | tr -d '[:space:]')
+  if [[ "$size" -gt "$UPLOAD_MAX_BYTES" ]]; then
+    die "directory too large: compressed archive is ${size} bytes, over the ${UPLOAD_MAX_BYTES}-byte (32MiB) upload cap; exclude large artifacts (.gitignore is honored in a git work tree) or index a subdirectory"
+  fi
+}
+
+# Fire the create request for the resolved target and print the 202 JSON. Both
+# sources return the same {sessionId, slug, state} shape.
+request_create() {
+  if [[ "$TARGET_KIND" == "github" ]]; then
+    local body
+    body=$("$JQ_BIN" -nc --arg u "$TARGET_LABEL" '{repoUrl:$u}')
+    api POST "$BASE_URL/api/v1/kb" "$body"
+  else
+    api_upload_gzip \
+      "$BASE_URL/api/v1/kb/local?name=$("$JQ_BIN" -nr --arg v "$TARGET_NAME" '$v|@uri')" \
+      "$ARCHIVE_TMP"
+  fi
+}
+
 cmd_create() {
-  [[ $# -ge 1 ]] || die "create requires a repo URL"
-  local url="$1"
-  assert_github_url "$url"
-  local body resp id slug state
-  body=$("$JQ_BIN" -nc --arg u "$url" '{repoUrl:$u}')
-  resp=$(api POST "$BASE_URL/api/v1/kb" "$body")
+  [[ $# -ge 1 ]] || die "create requires a repo URL or local directory"
+  resolve_target "$1"
+  local resp id slug state
+  resp=$(request_create)
   id=$(echo "$resp" | "$JQ_BIN" -r '.sessionId')
   slug=$(echo "$resp" | "$JQ_BIN" -r '.slug // ""')
   state=$(echo "$resp" | "$JQ_BIN" -r '.state')
-  save_current_session "$id" "$url" ""
+  save_current_session "$id" "$TARGET_LABEL" ""
   echo "sessionId: $id"
   [[ -n "$slug" ]] && echo "slug: $slug"
   echo "state: $state"
@@ -276,8 +431,8 @@ cmd_status() {
 }
 
 cmd_open() {
-  [[ $# -ge 1 ]] || die "open requires a repo URL"
-  local url="$1"; shift
+  [[ $# -ge 1 ]] || die "open requires a repo URL or local directory"
+  local target="$1"; shift
   local timeout=60
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -285,13 +440,12 @@ cmd_open() {
       *) die "unknown open option: $1" ;;
     esac
   done
-  assert_github_url "$url"
-  local body resp id
-  body=$("$JQ_BIN" -nc --arg u "$url" '{repoUrl:$u}')
-  resp=$(api POST "$BASE_URL/api/v1/kb" "$body")
+  resolve_target "$target"
+  local resp id
+  resp=$(request_create)
   id=$(echo "$resp" | "$JQ_BIN" -r '.sessionId')
-  save_current_session "$id" "$url" ""
-  echo "opening $url" >&2
+  save_current_session "$id" "$TARGET_LABEL" ""
+  echo "opening $TARGET_LABEL" >&2
   echo "sessionId: $id" >&2
   # Poll status until ready | failed | timeout.
   local waited=0 state project
@@ -301,7 +455,7 @@ cmd_open() {
     case "$state" in
       ready)
         project=$(echo "$resp" | "$JQ_BIN" -r '.project // ""')
-        save_current_session "$id" "$url" "$project"
+        save_current_session "$id" "$TARGET_LABEL" "$project"
         echo "state: ready" >&2
         echo "project: $project" >&2
         echo "$id"

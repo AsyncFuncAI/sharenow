@@ -18,7 +18,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.3.0**
+**Skill version: 1.4.0**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
@@ -447,13 +447,14 @@ Several agents can share one working directory and one `.sharenow/state.json`. E
 | `--base-url {url}`               | API base URL (default: `https://sharenow.today`) |
 | `--allow-nonsharenow-base-url`   | Allow talking to a non-default `--base-url`         |
 
-## Codebase knowledge base (query any GitHub repo)
+## Codebase knowledge base (query any GitHub repo or local directory)
 
-Give `kb.sh` a public GitHub repo URL and it spins up a temporary sandbox, clones the
-repo, and indexes it into a code graph (fast, no embeddings, low token cost). You then
-ask structural questions: overview the architecture, list and filter symbols, read real
-source, trace call paths, or run a graph query. The knowledge base is ephemeral, so it
-self-cleans when it goes idle.
+Give `kb.sh` a public GitHub repo URL, or a local directory path, and it spins up a
+temporary sandbox, materializes the code there (git clone for a URL; a gitignore-aware
+tar upload for a local path), and indexes it into a code graph (fast, no embeddings,
+low token cost). You then ask structural questions: overview the architecture, list and
+filter symbols, read real source, trace call paths, or run a graph query. The knowledge
+base is ephemeral, so it self-cleans when it goes idle.
 
 Use this when asked to "understand this repo", "index this codebase", "where is X
 defined", "what does function Y do", "who calls Z", "what would breaking change to Z
@@ -465,6 +466,9 @@ The one-shot flow (create and wait until ready in a single command):
 ```bash
 # open: create the KB and block until it is ready (prints the sessionId)
 scripts/kb.sh open https://github.com/pallets/click
+
+# or index the CURRENT working directory (any local path works, e.g. ../other-proj)
+scripts/kb.sh open .
 
 # orient first: languages, entry points, routes, hotspots, clusters
 scripts/kb.sh query architecture
@@ -511,9 +515,18 @@ The active session is remembered in `.sharenow/state.json` under `.kb.current`, 
 `status`, `query`, `source`, and `close` act on the last opened repo without repeating
 the id. Target a specific one with `--session {kb_...}` (or `$SHARENOW_KB_SESSION`).
 
-Only public `https://github.com/{owner}/{repo}` URLs are accepted in v1. Each open KB
-holds a live sandbox that costs real compute, so `close` when you are done (or let it
-expire). Results are the code-graph engine's JSON, returned under `.result`.
+URL targets must be public `https://github.com/{owner}/{repo}` URLs in v1. A local
+directory target is tarred client-side and uploaded: inside a git work tree the archive
+is gitignore-aware (tracked plus untracked-unignored files that still exist on disk,
+never `.git` itself; submodules are excluded; open the submodule's own directory to
+index it); outside git it falls back to a plain tar that skips the usual dependency and
+build dirs (`node_modules`, `dist`, `build`, `.next`, `target`). An empty or
+fully-gitignored directory fails fast with "nothing to index". The compressed archive
+is capped at 32MiB; if a directory is over the cap, gitignore large artifacts or index
+a subdirectory. The project name is the directory's basename (sanitized to
+`[A-Za-z0-9._-]`). Each open KB holds a live sandbox that costs real compute, so
+`close` when you are done (or let it expire). Results are the code-graph engine's
+JSON, returned under `.result`.
 
 ### kb.sh options
 
