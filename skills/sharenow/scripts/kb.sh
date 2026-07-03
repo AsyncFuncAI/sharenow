@@ -94,6 +94,9 @@ fi
 
 command -v curl >/dev/null 2>&1 || die "requires curl"
 
+# Shared HTTP response handling (needs JQ_BIN + die, both defined above).
+. "$SCRIPT_DIR/lib/http.sh"
+
 CLIENT_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -133,10 +136,20 @@ save_current_session() {
   local id="$1" repo="$2" project="$3"
   mkdir -p "$STATE_DIR"
   [[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"
-  "$JQ_BIN" --arg id "$id" --arg repo "$repo" --arg project "$project" \
+  # Write to a UNIQUE temp in the same directory (same filesystem, so `mv` stays
+  # atomic) instead of a fixed "$STATE_FILE.tmp": concurrent invocations in one
+  # directory would otherwise clobber each other's temp and lose/corrupt the file.
+  # rm the temp on any jq failure so a bad write never leaves a stray file behind.
+  local tmp
+  tmp=$(mktemp "$STATE_DIR/.state.XXXXXX") || die "cannot create temp state file in $STATE_DIR"
+  if "$JQ_BIN" --arg id "$id" --arg repo "$repo" --arg project "$project" \
     '.kb = (.kb // {}) | .kb.current = $id | .kb.byId = (.kb.byId // {}) | .kb.byId[$id] = {repoUrl: $repo, project: $project}' \
-    "$STATE_FILE" > "$STATE_FILE.tmp"
-  mv "$STATE_FILE.tmp" "$STATE_FILE"
+    "$STATE_FILE" > "$tmp"; then
+    mv "$tmp" "$STATE_FILE"
+  else
+    rm -f "$tmp"
+    die "failed to update $STATE_FILE"
+  fi
 }
 
 current_session() {
@@ -145,32 +158,9 @@ current_session() {
   "$JQ_BIN" -r '.kb.current // ""' "$STATE_FILE" 2>/dev/null || echo ""
 }
 
-# Shared tail for api()/api_upload_gzip(): given the HTTP status and the temp file
-# holding the response body, either surface a clean error (non-2xx: prefer the JSON
-# `.error`/`.message`, else the raw body) or print the body and return. Removes the
-# temp file on every path.
-handle_api_response() {
-  local code="$1" tmp="$2"
-  if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
-    local err candidates
-    err=$("$JQ_BIN" -r '.error // .message // empty' "$tmp" 2>/dev/null || true)
-    [[ -n "$err" ]] || err="$(cat "$tmp")"
-    candidates=$("$JQ_BIN" -r '.details.candidates // [] | .[]' "$tmp" 2>/dev/null || true)
-    rm -f "$tmp"
-    if [[ -n "$candidates" ]]; then
-      echo "error: HTTP $code: $err" >&2
-      echo "candidates:" >&2
-      while IFS= read -r c; do
-        [[ -n "$c" ]] || continue
-        echo "  $c" >&2
-      done <<< "$candidates"
-      exit 1
-    fi
-    die "HTTP $code: $err"
-  fi
-  cat "$tmp"
-  rm -f "$tmp"
-}
+# The shared response tail (curl wrote the body to a temp file + gave the status;
+# surface a clean error or print the body) now lives in lib/http.sh as
+# http_handle_response, sourced above. api()/api_upload_gzip() call it below.
 
 # Keyless HTTP call. Errors on a non-2xx and surfaces the JSON `.error`.
 api() {
@@ -187,7 +177,7 @@ api() {
     code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" \
       "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}")
   fi
-  handle_api_response "$code" "$tmp"
+  http_handle_response "$code" "$tmp"
 }
 
 # Raw-body variant of api(): POSTs a file's bytes verbatim (application/gzip),
@@ -200,7 +190,7 @@ api_upload_gzip() {
   code=$(curl -sS -o "$tmp" -w "%{http_code}" -X POST "$url" \
     "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
     -H "content-type: application/gzip" --data-binary "@$file")
-  handle_api_response "$code" "$tmp"
+  http_handle_response "$code" "$tmp"
 }
 
 require_session() {

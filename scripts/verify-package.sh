@@ -30,6 +30,10 @@ REQUIRED_PATHS=(
   "sharenow/scripts/publish.sh"
   "sharenow/scripts/drive.sh"
   "sharenow/scripts/account.sh"
+  "sharenow/scripts/lib/http.sh"
+  "tests/run-tests.sh"
+  "tests/stubs/curl"
+  "skills/sharenow/scripts/lib/http.sh"
   "skills/sharenow/SKILL.md"
   "skills/sharenow/AGENTS.md"
   "skills/sharenow/scripts/publish.sh"
@@ -60,8 +64,11 @@ while IFS= read -r -d '' sh; do
 done < <(find . -path ./.git -prune -o -name '*.sh' -type f -print0)
 
 # --- 4. Executable bits on skill scripts ------------------------------------
+# Entrypoint scripts must be executable. Files under scripts/lib/ are SOURCED, not
+# executed (lib/http.sh), so they are intentionally non-executable and excluded.
 echo "[4] executable bits"
 while IFS= read -r -d '' sh; do
+  case "$sh" in */scripts/lib/*) continue ;; esac
   if [[ -x "$sh" ]]; then pass "+x ${sh#./}"; else fail "not executable: ${sh#./}"; fi
 done < <(find . -path ./.git -prune -o -path '*/scripts/*.sh' -type f -print0)
 
@@ -119,6 +126,24 @@ for field in name version homepage repository license; do
     fail "$field differs across manifests (codex='$cv' cursor='$uv')"
   fi
 done
+
+# --- 9. Shell test suite ----------------------------------------------------
+# Run the plain-bash regression net under /bin/bash (macOS system bash 3.2) so a
+# future edit to any script cannot ship untested. The runner exits nonzero on any
+# failing test; capture its output for the log on failure.
+echo "[9] shell tests (tests/run-tests.sh under /bin/bash)"
+if [[ -f tests/run-tests.sh ]]; then
+  test_out=""; test_rc=0
+  test_out="$(/bin/bash tests/run-tests.sh 2>&1)" || test_rc=$?
+  if [[ "$test_rc" -eq 0 ]]; then
+    pass "$(printf '%s\n' "$test_out" | grep -E '^# (PASS|FAIL)' | head -1)"
+  else
+    fail "shell tests failed (tests/run-tests.sh)"
+    printf '%s\n' "$test_out" | grep -E '^not ok|^#   ' | sed 's/^/    /' >&2
+  fi
+else
+  fail "missing tests/run-tests.sh"
+fi
 
 # --- Summary ----------------------------------------------------------------
 echo ""

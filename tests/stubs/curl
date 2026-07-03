@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Stub `curl` for the sharenow shell-test harness. It replaces the real curl on
+# PATH so the canonical scripts run their full logic against canned responses
+# with zero network. It emulates only the two invocation shapes the scripts use:
+#
+#   1. Status-capturing form:  curl -sS -o <tmp> -w "%{http_code}" ...
+#        -> writes the canned body to the <tmp> file named by -o
+#        -> prints ONLY the HTTP status code on stdout (what -w does here)
+#
+#   2. Body-to-stdout form:    curl -fsS ... / curl -sS -X ... (no -o, no -w)
+#        -> prints the canned body on stdout
+#        -> with -f, a >=400 status exits nonzero and prints nothing (like real curl)
+#
+# The canned response is chosen from env, in priority order:
+#   STUB_CURL_STATUS   HTTP status to report/act on (default 200)
+#   STUB_CURL_BODY     literal response body (default "{}")
+#   STUB_CURL_BODY_FILE  path to a file whose contents are the body (wins over BODY)
+#   STUB_CURL_LOG      if set, append one line per call: METHOD<TAB>URL  (for asserting requests)
+#
+# The upload PUT paths in publish.sh/drive.sh use `-o /dev/null -w "%{http_code}"`;
+# those are handled by form 1 (writing the body to /dev/null, printing the status),
+# which is exactly what the scripts want (they only read the status there).
+
+set -u
+
+status="${STUB_CURL_STATUS:-200}"
+if [[ -n "${STUB_CURL_BODY_FILE:-}" && -f "${STUB_CURL_BODY_FILE:-}" ]]; then
+  body="$(cat "$STUB_CURL_BODY_FILE")"
+else
+  body="${STUB_CURL_BODY:-{\}}"
+fi
+
+# Parse just enough of the argv to know the output mode, the method, and the URL.
+out_file=""
+want_status_w=0
+fail_mode=0
+method="GET"
+url=""
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    -o) out_file="$arg"; prev=""; continue ;;
+    -X) method="$arg"; prev=""; continue ;;
+    -w) case "$arg" in *"%{http_code}"*) want_status_w=1 ;; esac; prev=""; continue ;;
+  esac
+  case "$arg" in
+    -o|-X|-w) prev="$arg"; continue ;;
+    -f|-sf|-fs|-sSf|-fsS|-fS|-Sf) fail_mode=1; prev=""; continue ;;
+    -*) prev=""; continue ;;                 # any other flag (or its value) we ignore
+    http://*|https://*) [[ -z "$url" ]] && url="$arg"; prev=""; continue ;;
+    *) prev=""; continue ;;
+  esac
+done
+# Aggregate short-flag clusters like -sS or -fsS that we did not special-case.
+for arg in "$@"; do
+  case "$arg" in
+    -*f*|-*F*) case "$arg" in --*) : ;; -*) fail_mode=1 ;; esac ;;
+  esac
+done
+
+if [[ -n "${STUB_CURL_LOG:-}" ]]; then
+  printf '%s\t%s\n' "$method" "$url" >> "$STUB_CURL_LOG"
+fi
+
+# -f (fail) semantics: on a >=400 status, real curl writes nothing and exits 22.
+if [[ "$fail_mode" -eq 1 && "$status" -ge 400 ]]; then
+  exit 22
+fi
+
+if [[ -n "$out_file" ]]; then
+  printf '%s' "$body" > "$out_file"
+fi
+
+if [[ "$want_status_w" -eq 1 ]]; then
+  printf '%s' "$status"
+elif [[ -z "$out_file" ]]; then
+  # Body-to-stdout form (no -o): emit the canned body.
+  printf '%s' "$body"
+fi
+
+exit 0

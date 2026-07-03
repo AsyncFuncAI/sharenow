@@ -82,6 +82,9 @@ fi
 
 command -v curl >/dev/null 2>&1 || die "requires curl"
 
+# Shared HTTP response handling (needs JQ_BIN + die, both defined above).
+. "$SCRIPT_DIR/lib/http.sh"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base-url) BASE_URL="$2"; shift 2 ;;
@@ -280,10 +283,20 @@ state_set() {
   mkdir -p "$STATE_DIR"
   local current='{"channels":{"byId":{}}}'
   [[ -f "$STATE_FILE" ]] && current=$(cat "$STATE_FILE")
-  echo "$current" | "$JQ_BIN" "${@+"$@"}" \
+  # Write to a UNIQUE temp in the same directory (same filesystem, so `mv` stays
+  # atomic) instead of a fixed "$STATE_FILE.tmp": many agents share one directory
+  # (that is the whole point of per-member state), so a fixed temp would let two
+  # concurrent writers clobber each other. rm the temp on jq failure.
+  local tmp
+  tmp=$(mktemp "$STATE_DIR/.state.XXXXXX") || die "cannot create temp state file in $STATE_DIR"
+  if echo "$current" | "$JQ_BIN" "${@+"$@"}" \
     'if .channels == null then .channels = {byId:{}} elif .channels.byId == null then .channels.byId = {} else . end | '"$program" \
-    > "$STATE_FILE.tmp"
-  mv "$STATE_FILE.tmp" "$STATE_FILE"
+    > "$tmp"; then
+    mv "$tmp" "$STATE_FILE"
+  else
+    rm -f "$tmp"
+    die "failed to update $STATE_FILE"
+  fi
 }
 
 # Keyless HTTP call (create/join). Errors on a non-2xx and surfaces the JSON
@@ -302,15 +315,7 @@ api_keyless() {
     code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" \
       "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}")
   fi
-  if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
-    local err
-    err=$("$JQ_BIN" -r '.error // empty' "$tmp" 2>/dev/null || true)
-    [[ -n "$err" ]] || err="$(cat "$tmp")"
-    rm -f "$tmp"
-    die "HTTP $code: $err"
-  fi
-  cat "$tmp"
-  rm -f "$tmp"
+  http_handle_response "$code" "$tmp"
 }
 
 # Authed HTTP call: the session travels in `x-channel-session`, NEVER in
@@ -332,15 +337,7 @@ api_session() {
       -H "x-channel-session: $session" \
       "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}")
   fi
-  if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
-    local err
-    err=$("$JQ_BIN" -r '.error // empty' "$tmp" 2>/dev/null || true)
-    [[ -n "$err" ]] || err="$(cat "$tmp")"
-    rm -f "$tmp"
-    die "HTTP $code: $err"
-  fi
-  cat "$tmp"
-  rm -f "$tmp"
+  http_handle_response "$code" "$tmp"
 }
 
 urlenc_path() {

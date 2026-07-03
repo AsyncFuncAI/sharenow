@@ -60,6 +60,13 @@ for cmd in curl file; do
   command -v "$cmd" >/dev/null 2>&1 || die "requires $cmd"
 done
 
+# Shared HTTP response handling (needs JQ_BIN + die, both defined above). publish.sh
+# does not use the temp-file api() pattern the other scripts share (its create/
+# upload/finalize steps read the response inline, each differently), so it does not
+# call http_handle_response today; the source keeps lib/http.sh present in every
+# script's SCRIPT_DIR and available if publish's flow is later unified.
+. "$SCRIPT_DIR/lib/http.sh"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --api-key)      API_KEY="$2"; API_KEY_SOURCE="flag"; shift 2 ;;

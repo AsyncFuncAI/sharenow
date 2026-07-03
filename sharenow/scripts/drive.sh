@@ -54,6 +54,9 @@ for cmd in curl file; do
   command -v "$cmd" >/dev/null 2>&1 || die "requires $cmd"
 done
 
+# Shared HTTP response handling (needs JQ_BIN + die, both defined above).
+. "$SCRIPT_DIR/lib/http.sh"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --api-key) API_KEY="$2"; shift 2 ;;
@@ -129,15 +132,7 @@ api_json() {
   else
     code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" "${auth_header[@]}")
   fi
-  if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
-    local err
-    err=$("$JQ_BIN" -r '.error // empty' "$tmp" 2>/dev/null || true)
-    [[ -n "$err" ]] || err="$(cat "$tmp")"
-    rm -f "$tmp"
-    die "HTTP $code: $err"
-  fi
-  cat "$tmp"
-  rm -f "$tmp"
+  http_handle_response "$code" "$tmp"
 }
 
 urlenc() {

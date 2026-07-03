@@ -18,7 +18,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.6.0**
+**Skill version: 1.7.0**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
