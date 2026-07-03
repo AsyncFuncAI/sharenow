@@ -18,7 +18,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.5.0**
+**Skill version: 1.6.0**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
@@ -579,6 +579,30 @@ a subdirectory. The project name is the directory's basename (sanitized to
 `[A-Za-z0-9._-]`). Each open KB holds a live sandbox that costs real compute, so
 `close` when you are done (or let it expire). Results are the code-graph engine's
 JSON, returned under `.result`.
+
+### Response shapes
+
+Each tool returns a different top-level JSON envelope (the engine's own, verbatim under
+`.result`). This table is the shape you jq against so you do not have to guess. The
+field names and label values come from the code-graph engine and vary by language and
+by graph: a label like `Module` or `Class` that exists for one repo may be absent for
+another, so always confirm labels with `query architecture` or `query schema` before
+filtering on them rather than assuming a fixed set.
+
+| Tool           | cbmem tool         | Top-level shape |
+| -------------- | ------------------ | --------------- |
+| `architecture` | `get_architecture` | orientation object: languages, entry points, routes, hotspots, clusters (engine-defined keys; run it first to see the exact fields for this repo) |
+| `schema`       | `get_graph_schema` | the graph's node labels and edge types (the label/edge vocabulary that is valid for `search_graph --label` and `graph`) |
+| `search_graph` | `search_graph`     | `{ total, has_more, results[] }` where each result carries `label`, `name`, `qualified_name` (take `qualified_name` from here to feed `source` or `trace`) |
+| `search_code`  | `search_code`      | `{ results[], raw_matches[], directories{}, total_results, total_grep_matches }` (grep-style matches grouped by symbol/file) |
+| `source`       | `get_code_snippet` | `{ source }`: the real definition text of the symbol. Accepts a full `home-user-<project>.pkg.mod.Sym` name OR any dot-suffix that matches uniquely (e.g. `core.Command`); an ambiguous suffix returns a `candidates:` list to disambiguate with |
+| `trace`        | `trace_path`       | `{ function, direction, callers[] and/or callees[] }` (per `--direction`: `inbound` fills `callers`, `outbound` fills `callees`, `both` fills both) |
+| `graph`        | `query_graph`      | `{ columns, rows, total }`: tabular rows for the Cypher query (shape follows your `RETURN` clause) |
+| `cat`          | (raw file read)    | raw file text on stdout, NOT JSON (it pipes like `cat`); truncation and hints go to stderr |
+
+Field sets beyond the top-level envelope are the engine's and can differ across engine
+versions and languages, so treat the columns above as the stable keys and inspect the
+live result for the rest.
 
 ### kb.sh options
 

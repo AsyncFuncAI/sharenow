@@ -70,6 +70,10 @@ status/query/source/close act on the last opened KB without repeating the id. Us
 --session to target a specific one. URL targets must be public https github.com
 repos; a local directory is tarred client-side (gitignore-aware inside a git work
 tree) and uploaded, capped at 32MiB compressed.
+
+Each tool returns a different JSON envelope; see the "Response shapes" table in
+SKILL.md for the top-level shape of every tool (source also accepts an unprefixed
+dot-suffix name, e.g. `core.Command`).
 USAGE
   exit 1
 }
@@ -516,6 +520,20 @@ cmd_query() {
   resp=$(api POST "$BASE_URL/api/v1/kb/$sid/query" "$body")
   # Print cbmem's result object verbatim (pretty when a tty, compact otherwise).
   if [[ -t 1 ]]; then echo "$resp" | "$JQ_BIN" '.result'; else echo "$resp" | "$JQ_BIN" -c '.result'; fi
+  # A successful query with zero hits is a valid result, not an error (exit stays 0
+  # and stdout above is untouched). But a silent empty set often means the filters or
+  # regex were too narrow, or the requested node label just does not exist on this
+  # graph (label sets vary per language). Nudge toward the two orientation commands.
+  case "$tool" in
+    search_graph|search_code|graph)
+      local empty
+      empty=$(echo "$resp" | "$JQ_BIN" -r \
+        '(.result | if type=="object" then (.results // .rows) else null end) as $r | if ($r|type)=="array" and ($r|length)==0 then "1" else "0" end')
+      if [[ "$empty" == "1" ]]; then
+        echo "hint: no results. Filters/regex may be too narrow, and node labels vary per graph (a label valid on one repo may not exist here). Try 'query architecture' or 'query schema' to see the graph's real labels and shapes." >&2
+      fi
+      ;;
+  esac
 }
 
 cmd_source() {
