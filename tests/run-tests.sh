@@ -170,6 +170,14 @@ assert_eq "source qualifiedName" 'a.b.C' "$(printf '%s' "$out" | jq -r '.args.qu
 assert_run "source missing --qualified-name errors" 1 "source requires --qualified-name" -- \
   kb_body source
 
+# context -> composite tool "context" + qualifiedName (mirrors source's arg shape).
+out="$(kb_body context --qualified-name 'worker.entry.handleRequest')"
+assert_eq "context tool name" 'context' "$(printf '%s' "$out" | jq -r '.tool')"
+assert_eq "context qualifiedName" 'worker.entry.handleRequest' "$(printf '%s' "$out" | jq -r '.args.qualifiedName')"
+assert_eq "context args has only qualifiedName" 'qualifiedName' "$(printf '%s' "$out" | jq -r '.args|keys|join(",")')"
+assert_run "context missing --qualified-name errors" 1 "context requires --qualified-name" -- \
+  kb_body context
+
 # graph -> query_graph + query.
 out="$(kb_body graph --query 'MATCH (n) RETURN n')"
 assert_eq "graph tool name" 'query_graph' "$(printf '%s' "$out" | jq -r '.tool')"
@@ -366,6 +374,77 @@ CHAN_CREATE_BODY='{"channelId":"ch_new","sessionToken":"tok","channelUrl":"https
 assert_run "channel create happy path" 0 "ch_new" -- \
   env STUB_CURL_BODY="$CHAN_CREATE_BODY" \
     bash -c 'cd "$1" && shift && /bin/bash "$@"' _ "$chan_wd" "$SCRIPTS/channel.sh" create --title "My Channel" --as boss
+
+# ==========================================================================
+# STEP 1f: kb.sh session reuse (open/close/--fresh) via the real CLI + stub curl.
+# The stub returns the SAME canned body for every call, so a create body that
+# already says state:"ready" makes cmd_open's poll see ready on the first status
+# GET - exactly the shape of a reused (handed-back) session. We assert:
+#   - open on a reused response prints "reused: true" and records it in state
+#   - close on a reused session skips DELETE (STUB_CURL_LOG shows no DELETE)
+#   - close on a fresh session still issues DELETE
+#   - open --fresh sends {"fresh":true} in the create body (STUB_CURL_BODY_LOG)
+# All kb paths are keyless, so no credentials are needed.
+# ==========================================================================
+echo "# --- kb.sh session reuse (open/close/--fresh) ---"
+
+# A reused open: server hands back an existing ready session (reused:true, ready).
+reuse_wd="$(new_workdir)"
+REUSED_BODY='{"sessionId":"kb_reused","slug":"s","state":"ready","reused":true,"project":"proj"}'
+reuse_out="$( ( cd "$reuse_wd" && STUB_CURL_BODY="$REUSED_BODY" \
+  /bin/bash "$SCRIPTS/kb.sh" open https://github.com/o/r ) 2>"$WORK/reuse_err" )"
+# The "reused: true" line goes to stderr (after the ready line).
+assert_eq "open reused prints reused line" "yes" \
+  "$(grep -q 'reused: true' "$WORK/reuse_err" && echo yes || echo no)"
+# State records reused:true for this session.
+assert_eq "open records reused in state" "true" \
+  "$(jq -r '.kb.byId.kb_reused.reused' "$reuse_wd/.sharenow/state.json")"
+
+# close on the reused session must NOT call DELETE. Drive close in the SAME dir with
+# the request log on; assert no DELETE line and that .kb.current was cleared.
+: > "$WORK/reuse_reqlog"
+close_out="$( ( cd "$reuse_wd" && STUB_CURL_LOG="$WORK/reuse_reqlog" STUB_CURL_BODY='{}' \
+  /bin/bash "$SCRIPTS/kb.sh" close ) 2>"$WORK/reuse_close_err" )"
+assert_eq "close on reused session issues NO DELETE" "0" \
+  "$(grep -c '^DELETE' "$WORK/reuse_reqlog" 2>/dev/null | tr -d '[:space:]')"
+assert_eq "close on reused session says shared/detached" "yes" \
+  "$(grep -q 'obtained via reuse' "$WORK/reuse_close_err" && echo yes || echo no)"
+assert_eq "close on reused session clears .kb.current" "null" \
+  "$(jq -r '.kb.current' "$reuse_wd/.sharenow/state.json")"
+
+# A FRESH open (no reused flag): close must still DELETE.
+fresh_wd="$(new_workdir)"
+FRESH_BODY='{"sessionId":"kb_fresh","slug":"s","state":"ready","project":"proj"}'
+( cd "$fresh_wd" && STUB_CURL_BODY="$FRESH_BODY" \
+  /bin/bash "$SCRIPTS/kb.sh" open https://github.com/o/r ) >/dev/null 2>&1
+assert_eq "fresh open records reused:false in state" "false" \
+  "$(jq -r '.kb.byId.kb_fresh.reused' "$fresh_wd/.sharenow/state.json")"
+: > "$WORK/fresh_reqlog"
+( cd "$fresh_wd" && STUB_CURL_LOG="$WORK/fresh_reqlog" \
+  STUB_CURL_BODY='{"sessionId":"kb_fresh","state":"deleted"}' \
+  /bin/bash "$SCRIPTS/kb.sh" close ) >/dev/null 2>&1
+assert_eq "close on fresh session issues a DELETE" "1" \
+  "$(grep -c '^DELETE' "$WORK/fresh_reqlog" 2>/dev/null | tr -d '[:space:]')"
+
+# open --fresh must send {"fresh":true} in the create POST body.
+fflag_wd="$(new_workdir)"
+: > "$WORK/fresh_bodylog"
+( cd "$fflag_wd" && STUB_CURL_BODY_LOG="$WORK/fresh_bodylog" \
+  STUB_CURL_BODY="$FRESH_BODY" \
+  /bin/bash "$SCRIPTS/kb.sh" open https://github.com/o/r --fresh ) >/dev/null 2>&1
+# The first logged body is the create POST. Assert it carries fresh:true.
+assert_eq "open --fresh sends fresh:true in create body" "true" \
+  "$(head -n1 "$WORK/fresh_bodylog" | jq -r '.fresh')"
+assert_eq "open --fresh keeps repoUrl in create body" "https://github.com/o/r" \
+  "$(head -n1 "$WORK/fresh_bodylog" | jq -r '.repoUrl')"
+# A plain open (no --fresh) must NOT set fresh in the body.
+plain_wd="$(new_workdir)"
+: > "$WORK/plain_bodylog"
+( cd "$plain_wd" && STUB_CURL_BODY_LOG="$WORK/plain_bodylog" \
+  STUB_CURL_BODY="$FRESH_BODY" \
+  /bin/bash "$SCRIPTS/kb.sh" open https://github.com/o/r ) >/dev/null 2>&1
+assert_eq "plain open omits fresh from create body" "null" \
+  "$(head -n1 "$WORK/plain_bodylog" | jq -r '.fresh')"
 
 # ==========================================================================
 # STEP 2: state.json write-race. Two interleaved writers must leave the file as

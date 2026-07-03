@@ -36,12 +36,16 @@ Global options:
   --client <name>        Agent name for attribution (e.g. cursor, claude-code)
 
 Commands:
-  open <repo-url|path> [--timeout <sec>]
+  open <repo-url|path> [--timeout <sec>] [--fresh]
                                       Create a KB from a public GitHub URL or a local
                                       directory (e.g. `.`) and wait until it is ready
                                       (default timeout 60s). Polls status for you until
                                       ready, so no separate `status` call is needed here.
                                       Prints the sessionId + project and saves the session.
+                                      A repeat open of the same GitHub repo may reuse an
+                                      existing ready session (~1s, shared with other agents);
+                                      it prints `reused: true`. --fresh forces a new,
+                                      isolated session instead of reusing one.
   create <repo-url|path>              Create only (do not wait); prints sessionId + state.
   status                              Re-check the current session's state later (and project
                                       when ready). `open` already polls until ready.
@@ -54,16 +58,25 @@ Commands:
                                                       [--exclude-entry-points] [--limit <n>] [--offset <n>]
                                         search_code   --pattern <text>
                                         source        --qualified-name <qname>   read real source (get_code_snippet)
+                                        context       --qualified-name <qname>   symbol + depth-1 callers/callees in one call
                                         trace         --function <qname> [--direction inbound|outbound|both]
                                                       [--depth 1-5] [--risk-labels]   call paths (trace_path)
                                         graph         --query "<cypher>"          arbitrary read-only query (query_graph)
   source <qualified-name>             Shorthand for: query source --qualified-name <qname>
+  context <qualified-name>            Shorthand for: query context --qualified-name <qname>.
+                                      One call returns { symbol, callers, callees, warnings? }
+                                      - the symbol source plus its depth-1 callers and callees.
+                                      Reach for this first on "what is X / how is X used".
   cat <path> [--from <n>] [--to <n>]  Read a raw file from the indexed repo by its
                                       repo-relative path (configs, READMEs, module
                                       top-level code that has no symbol). Output is
                                       capped at 64KB; page big files with --from/--to
                                       (1-based lines). Prefer `source` for symbols.
-  close                               Delete the current session (frees the sandbox now).
+  close                               Free the current session. A session THIS client
+                                      provisioned fresh is DELETEd (frees the sandbox now).
+                                      A session obtained via reuse is shared with other
+                                      agents, so close only detaches locally and lets it
+                                      expire on idle - it is never DELETEd.
 
 The active session is remembered in .sharenow/state.json under .kb.current, so
 status/query/source/close act on the last opened KB without repeating the id. Use
@@ -133,17 +146,20 @@ STATE_DIR=".sharenow"
 STATE_FILE="${STATE_DIR}/state.json"
 
 save_current_session() {
-  local id="$1" repo="$2" project="$3"
+  local id="$1" repo="$2" project="$3" reused="${4:-false}"
   mkdir -p "$STATE_DIR"
   [[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"
   # Write to a UNIQUE temp in the same directory (same filesystem, so `mv` stays
   # atomic) instead of a fixed "$STATE_FILE.tmp": concurrent invocations in one
   # directory would otherwise clobber each other's temp and lose/corrupt the file.
   # rm the temp on any jq failure so a bad write never leaves a stray file behind.
+  # `reused` records that this session was HANDED BACK by the server (an existing
+  # ready session for the same repo), so close knows not to DELETE a shared session.
   local tmp
   tmp=$(mktemp "$STATE_DIR/.state.XXXXXX") || die "cannot create temp state file in $STATE_DIR"
   if "$JQ_BIN" --arg id "$id" --arg repo "$repo" --arg project "$project" \
-    '.kb = (.kb // {}) | .kb.current = $id | .kb.byId = (.kb.byId // {}) | .kb.byId[$id] = {repoUrl: $repo, project: $project}' \
+    --argjson reused "${reused:-false}" \
+    '.kb = (.kb // {}) | .kb.current = $id | .kb.byId = (.kb.byId // {}) | .kb.byId[$id] = {repoUrl: $repo, project: $project, reused: $reused}' \
     "$STATE_FILE" > "$tmp"; then
     mv "$tmp" "$STATE_FILE"
   else
@@ -258,6 +274,14 @@ build_query_body() {
       [[ -n "$qname" ]] || die "source requires --qualified-name"
       "$JQ_BIN" -nc --arg q "$qname" '{tool:"get_code_snippet", args:{qualifiedName:$q}}'
       ;;
+    context)
+      # Server-side composite: symbol + inbound/outbound wiring in one call. Same
+      # positional arg as source (suffix-friendly qualifiedName); the tool name IS
+      # "context" (not a cbmem tool) - the server composes it from get_code_snippet
+      # + trace_path depth 1.
+      [[ -n "$qname" ]] || die "context requires --qualified-name"
+      "$JQ_BIN" -nc --arg q "$qname" '{tool:"context", args:{qualifiedName:$q}}'
+      ;;
     graph)
       [[ -n "$cypher" ]] || die "graph requires --query"
       "$JQ_BIN" -nc --arg q "$cypher" '{tool:"query_graph", args:{query:$q}}'
@@ -279,7 +303,7 @@ build_query_body() {
            + (if $dep!="" then {depth:($dep|tonumber)} else {} end)
            + (if $risk then {riskLabels:true} else {} end) )}'
       ;;
-    *) die "unknown tool: $tool (use search_graph|search_code|source|graph|architecture|schema|trace)" ;;
+    *) die "unknown tool: $tool (use search_graph|search_code|source|context|graph|architecture|schema|trace)" ;;
   esac
 }
 
@@ -407,12 +431,20 @@ resolve_target() {
   fi
 }
 
-# Fire the create request for the resolved target and print the 202 JSON. Both
-# sources return the same {sessionId, slug, state} shape.
+# Fire the create request for the resolved target and print the create JSON. Both
+# sources return the same {sessionId, slug, state} shape; a GitHub create may also
+# carry {reused:true, state:"ready"} when the server hands back an existing session.
+# FRESH=1 (from `open --fresh`) sends {"fresh":true} to force a new provision;
+# local uploads never reuse, so the flag is a no-op there.
+FRESH=0
 request_create() {
   if [[ "$TARGET_KIND" == "github" ]]; then
     local body
-    body=$("$JQ_BIN" -nc --arg u "$TARGET_LABEL" '{repoUrl:$u}')
+    if [[ "$FRESH" -eq 1 ]]; then
+      body=$("$JQ_BIN" -nc --arg u "$TARGET_LABEL" '{repoUrl:$u, fresh:true}')
+    else
+      body=$("$JQ_BIN" -nc --arg u "$TARGET_LABEL" '{repoUrl:$u}')
+    fi
     api POST "$BASE_URL/api/v1/kb" "$body"
   else
     api_upload_gzip \
@@ -424,15 +456,18 @@ request_create() {
 cmd_create() {
   [[ $# -ge 1 ]] || die "create requires a repo URL or local directory"
   resolve_target "$1"
-  local resp id slug state
+  local resp id slug state reused
   resp=$(request_create)
   id=$(echo "$resp" | "$JQ_BIN" -r '.sessionId')
   slug=$(echo "$resp" | "$JQ_BIN" -r '.slug // ""')
   state=$(echo "$resp" | "$JQ_BIN" -r '.state')
-  save_current_session "$id" "$TARGET_LABEL" ""
+  # Record reuse so a later close on this session detaches instead of DELETEing it.
+  reused=$(echo "$resp" | "$JQ_BIN" -r 'if .reused == true then "true" else "false" end')
+  save_current_session "$id" "$TARGET_LABEL" "" "$reused"
   echo "sessionId: $id"
   [[ -n "$slug" ]] && echo "slug: $slug"
   echo "state: $state"
+  [[ "$reused" == "true" ]] && echo "reused: true" >&2
   echo "$id"
 }
 
@@ -451,17 +486,22 @@ cmd_open() {
   [[ $# -ge 1 ]] || die "open requires a repo URL or local directory"
   local target="$1"; shift
   local timeout=60
+  FRESH=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --timeout) timeout="$2"; shift 2 ;;
+      --fresh) FRESH=1; shift ;;
       *) die "unknown open option: $1" ;;
     esac
   done
   resolve_target "$target"
-  local resp id
+  local resp id reused
   resp=$(request_create)
   id=$(echo "$resp" | "$JQ_BIN" -r '.sessionId')
-  save_current_session "$id" "$TARGET_LABEL" ""
+  # The server marks a handed-back existing session with reused:true. Record it so
+  # `close` knows this session is shared and must not be DELETEd.
+  reused=$(echo "$resp" | "$JQ_BIN" -r 'if .reused == true then "true" else "false" end')
+  save_current_session "$id" "$TARGET_LABEL" "" "$reused"
   echo "opening $TARGET_LABEL" >&2
   echo "sessionId: $id" >&2
   # Poll status until ready | failed | timeout. Ramp the delay (0.5s, 1s, 2s, then
@@ -475,9 +515,14 @@ cmd_open() {
     case "$state" in
       ready)
         project=$(echo "$resp" | "$JQ_BIN" -r '.project // ""')
-        save_current_session "$id" "$TARGET_LABEL" "$project"
+        # Preserve the reused flag captured from the create response (the status
+        # payload does not carry it), so close still sees a shared session.
+        save_current_session "$id" "$TARGET_LABEL" "$project" "$reused"
         echo "state: ready" >&2
         echo "project: $project" >&2
+        # A reused session was handed back from an existing ready provision: print
+        # it AFTER the ready line so an agent knows this open was shared (and cheap).
+        [[ "$reused" == "true" ]] && echo "reused: true" >&2
         echo "$id"
         return 0
         ;;
@@ -531,6 +576,15 @@ cmd_source() {
   cmd_query source --qualified-name "$1"
 }
 
+# One-call "what is X and how is it wired": the symbol source plus its depth-1
+# callers and callees, composed server side. Mirrors cmd_source's arg shape (a
+# positional, suffix-friendly qualified name) and prints the result verbatim like
+# every other tool (pretty on a tty, compact when piped) via cmd_query.
+cmd_context() {
+  [[ $# -ge 1 ]] || die "context requires a qualified name"
+  cmd_query context --qualified-name "$1"
+}
+
 # Read a raw file from the indexed repo (POST /:id/file). Prints the CONTENT raw
 # on stdout (not JSON) so it pipes like cat; a truncation warning goes to stderr.
 # The path is repo-relative; --from/--to are 1-based line numbers (either alone
@@ -561,9 +615,41 @@ cmd_cat() {
   echo "$resp" | "$JQ_BIN" -j '.result.content'
 }
 
+# Read the recorded `reused` flag for a session id from state.json (default false
+# when there is no state file, no entry, or the field is absent).
+session_reused() {
+  local id="$1"
+  [[ -f "$STATE_FILE" ]] || { echo "false"; return; }
+  "$JQ_BIN" -r --arg id "$id" '.kb.byId[$id].reused // false' "$STATE_FILE" 2>/dev/null || echo "false"
+}
+
+# Clear .kb.current locally without touching the server. Used when detaching from a
+# shared (reused) session: the entry stays in byId, but this client stops pointing at it.
+clear_current_session() {
+  [[ -f "$STATE_FILE" ]] || return 0
+  local tmp
+  tmp=$(mktemp "$STATE_DIR/.state.XXXXXX") || die "cannot create temp state file in $STATE_DIR"
+  if "$JQ_BIN" 'if (.kb | type) == "object" then .kb.current = null else . end' \
+    "$STATE_FILE" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$STATE_FILE"
+  else
+    rm -f "$tmp"
+  fi
+}
+
 cmd_close() {
   local sid resp
   sid="$(require_session)"
+  # S2 mitigation: a session we obtained by REUSE is shared with other agents, so a
+  # polite client must not DELETE it (that would yank the sandbox out from under
+  # them; it self-heals on the next open, but destroying shared state is rude). We
+  # only detach locally and let it expire on idle. A session THIS client provisioned
+  # fresh is ours to delete, so it keeps the normal DELETE behavior.
+  if [[ "$(session_reused "$sid")" == "true" ]]; then
+    echo "session $sid was obtained via reuse (shared with other agents); not deleting it - it expires on idle. Detached locally." >&2
+    clear_current_session
+    return 0
+  fi
   resp=$(api DELETE "$BASE_URL/api/v1/kb/$sid")
   echo "$resp" | "$JQ_BIN" -r '"closed: \(.sessionId) (\(.state))"'
 }
@@ -574,6 +660,7 @@ case "$COMMAND" in
   status) cmd_status "$@" ;;
   query)  cmd_query "$@" ;;
   source) cmd_source "$@" ;;
+  context) cmd_context "$@" ;;
   cat)    cmd_cat "$@" ;;
   close)  cmd_close "$@" ;;
   *) die "unknown command: $COMMAND (see: kb.sh --help)" ;;

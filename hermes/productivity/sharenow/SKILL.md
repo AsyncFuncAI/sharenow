@@ -18,7 +18,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.7.0**
+**Skill version: 1.8.0**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
@@ -461,9 +461,27 @@ defined", "what does function Y do", "who calls Z", "what would breaking change 
 affect", "show me the source of Z", "find dead code", or "give me a queryable map of
 this repository". It is keyless in v1: no API key is needed.
 
+### One call for "what is X and how is it wired": `context`
+
+When the question is about a single symbol - "what is X", "what does Y do", "who
+uses Z", "how is X used" - reach for **`context`** first. One call returns the
+symbol's real source plus its depth-1 callers and callees, composed server side:
+
+```bash
+scripts/kb.sh context worker.entry.handleRequest
+```
+
+It returns `{ symbol, callers, callees, warnings? }` in a single round trip, so you
+do not need a `source` call followed by two `trace` calls. `context` takes the same
+suffix-friendly qualified name as `source` (e.g. `core.Command`), and if one trace
+leg fails it still returns the symbol with that leg empty plus a `warnings` entry
+naming the failed leg. Use the `source`/`trace` pair below only when you want just
+the source, or a deeper (multi-hop) trace than depth 1.
+
 ### Start with three tools
 
-Most "understand this repo" work needs only three tools, in this order:
+For broader "understand this repo" work (not a single named symbol), three tools
+cover most of it, in this order:
 
 1. **`architecture`** - orient: languages, entry points, routes, hotspots, clusters.
 2. **`search_graph`** - list and filter symbols by structure (functions, classes, files).
@@ -506,6 +524,10 @@ cheapest tool that answers the question, and prefer the structural tools over a 
 `graph` query.
 
 ```bash
+# context: the symbol + its depth-1 callers and callees in ONE call (prefer this
+# over a source + two trace calls when you want "what is X and how is it wired")
+scripts/kb.sh context home-user-click.src.click.core.Command
+
 # search_code: grep for a string across the code
 scripts/kb.sh query search_code --pattern "def main"
 
@@ -538,6 +560,7 @@ tools - reach for them once the three core tools do not cover the question.
 | List or filter symbols by structure             | `search_graph` | `--label`, `--name <re>`, `--file <re>`, `--limit` (default 50), `--offset` |
 | Find dead code (unreferenced, non-entry)        | `search_graph` | `--max-degree 0 --exclude-entry-points` |
 | Find hotspots (most-connected symbols)          | `search_graph` | `--min-degree <n>` |
+| Answer "what is X and how is it wired" in one call | `context`    | `<qualified-name>` (symbol + depth-1 callers/callees) |
 | Read the real source of a known symbol          | `source`       | `<qualified-name>` |
 | Grep for a string across the code               | `search_code`  | `--pattern <text>` |
 | Trace call paths (callers or callees)           | `trace`        | `--function <qname or bare name>`, `--direction`, `--depth 1-5`, `--risk-labels` |
@@ -564,8 +587,20 @@ you care about, then `source` / `trace` to go deep on them, and `cat` for the
 manifests and configs the graph does not index.
 
 The active session is remembered in `.sharenow/state.json` under `.kb.current`, so
-`status`, `query`, `source`, `cat`, and `close` act on the last opened repo without
-repeating the id. Target a specific one with `--session {kb_...}` (or `$SHARENOW_KB_SESSION`).
+`status`, `query`, `source`, `context`, `cat`, and `close` act on the last opened repo
+without repeating the id. Target a specific one with `--session {kb_...}` (or `$SHARENOW_KB_SESSION`).
+
+### Session reuse on open
+
+A repeat `open` of the **same GitHub repo** is cheap: the server hands back an
+existing ready session instead of re-provisioning, so the second open returns in
+~1s and prints `reused: true`. That session is **shared** with the other agents
+using it, so `close` on a reused session does not delete it - it only detaches this
+client locally and lets the session expire on idle (deleting shared state would yank
+the sandbox out from under the other agents). A session you provisioned fresh is
+still DELETEd by `close` as before. Pass `open --fresh` to force a new, isolated
+session (skipping reuse) when you need a private sandbox. Reuse applies to GitHub
+URLs only; local-directory uploads never reuse (working trees differ).
 
 URL targets must be public `https://github.com/{owner}/{repo}` URLs in v1. A local
 directory target is tarred client-side and uploaded: inside a git work tree the archive
@@ -596,6 +631,7 @@ filtering on them rather than assuming a fixed set.
 | `search_graph` | `search_graph`     | `{ total, has_more, results[] }` where each result carries `label`, `name`, `qualified_name` (take `qualified_name` from here to feed `source` or `trace`) |
 | `search_code`  | `search_code`      | `{ results[], raw_matches[], directories{}, total_results, total_grep_matches }` (grep-style matches grouped by symbol/file) |
 | `source`       | `get_code_snippet` | `{ source }`: the real definition text of the symbol. Accepts a full `home-user-<project>.pkg.mod.Sym` name OR any dot-suffix that matches uniquely (e.g. `core.Command`); an ambiguous suffix returns a `candidates:` list to disambiguate with |
+| `context`      | (composite)        | `{ symbol, callers, callees, warnings? }`: `symbol` is the `source` envelope; `callers`/`callees` are depth-1 `trace_path` envelopes (inbound/outbound). Same suffix-friendly name and `candidates:` behavior as `source`. If a trace leg fails, that leg is empty and `warnings` names it (the symbol still returns) |
 | `trace`        | `trace_path`       | `{ function, direction, callers[] and/or callees[] }` (per `--direction`: `inbound` fills `callers`, `outbound` fills `callees`, `both` fills both) |
 | `graph`        | `query_graph`      | `{ columns, rows, total }`: tabular rows for the Cypher query (shape follows your `RETURN` clause) |
 | `cat`          | (raw file read)    | raw file text on stdout, NOT JSON (it pipes like `cat`); truncation and hints go to stderr |

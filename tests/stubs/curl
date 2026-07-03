@@ -16,6 +16,7 @@
 #   STUB_CURL_BODY     literal response body (default "{}")
 #   STUB_CURL_BODY_FILE  path to a file whose contents are the body (wins over BODY)
 #   STUB_CURL_LOG      if set, append one line per call: METHOD<TAB>URL  (for asserting requests)
+#   STUB_CURL_BODY_LOG if set, append one line per call: the -d/--data-binary body (for asserting payloads)
 #
 # The upload PUT paths in publish.sh/drive.sh use `-o /dev/null -w "%{http_code}"`;
 # those are handled by form 1 (writing the body to /dev/null, printing the status),
@@ -36,15 +37,17 @@ want_status_w=0
 fail_mode=0
 method="GET"
 url=""
+data=""
 prev=""
 for arg in "$@"; do
   case "$prev" in
     -o) out_file="$arg"; prev=""; continue ;;
     -X) method="$arg"; prev=""; continue ;;
     -w) case "$arg" in *"%{http_code}"*) want_status_w=1 ;; esac; prev=""; continue ;;
+    -d|--data-binary) data="$arg"; prev=""; continue ;;
   esac
   case "$arg" in
-    -o|-X|-w) prev="$arg"; continue ;;
+    -o|-X|-w|-d|--data-binary) prev="$arg"; continue ;;
     -f|-sf|-fs|-sSf|-fsS|-fS|-Sf) fail_mode=1; prev=""; continue ;;
     -*) prev=""; continue ;;                 # any other flag (or its value) we ignore
     http://*|https://*) [[ -z "$url" ]] && url="$arg"; prev=""; continue ;;
@@ -60,6 +63,13 @@ done
 
 if [[ -n "${STUB_CURL_LOG:-}" ]]; then
   printf '%s\t%s\n' "$method" "$url" >> "$STUB_CURL_LOG"
+fi
+
+# Optional request-body log: one line per call with the -d / --data-binary payload
+# (empty for bodyless calls). Lets tests assert exactly what was POSTed, e.g. the
+# {"fresh":true} create body.
+if [[ -n "${STUB_CURL_BODY_LOG:-}" ]]; then
+  printf '%s\n' "$data" >> "$STUB_CURL_BODY_LOG"
 fi
 
 # -f (fail) semantics: on a >=400 status, real curl writes nothing and exits 22.
