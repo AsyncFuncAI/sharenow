@@ -186,11 +186,11 @@ api() {
   local tmp code
   tmp=$(mktemp)
   if [[ -n "$body" ]]; then
-    code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" \
+    code=$(curl -sS --max-time "${KB_HTTP_DEADLINE:-150}" -o "$tmp" -w "%{http_code}" -X "$method" "$url" \
       "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
       -H "content-type: application/json" -d "$body")
   else
-    code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" \
+    code=$(curl -sS --max-time "${KB_HTTP_DEADLINE:-150}" -o "$tmp" -w "%{http_code}" -X "$method" "$url" \
       "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}")
   fi
   http_handle_response "$code" "$tmp"
@@ -203,7 +203,7 @@ api_upload_gzip() {
   local url="$1" file="$2"
   local tmp code
   tmp=$(mktemp)
-  code=$(curl -sS -o "$tmp" -w "%{http_code}" -X POST "$url" \
+  code=$(curl -sS --max-time "${KB_HTTP_DEADLINE:-150}" -o "$tmp" -w "%{http_code}" -X POST "$url" \
     "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
     -H "content-type: application/gzip" --data-binary "@$file")
   http_handle_response "$code" "$tmp"
