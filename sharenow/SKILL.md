@@ -18,7 +18,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.4.0**
+**Skill version: 1.5.0**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
@@ -461,52 +461,89 @@ defined", "what does function Y do", "who calls Z", "what would breaking change 
 affect", "show me the source of Z", "find dead code", or "give me a queryable map of
 this repository". It is keyless in v1: no API key is needed.
 
+### Start with three tools
+
+Most "understand this repo" work needs only three tools, in this order:
+
+1. **`architecture`** - orient: languages, entry points, routes, hotspots, clusters.
+2. **`search_graph`** - list and filter symbols by structure (functions, classes, files).
+   Without `--limit` the server applies a default limit of 50; page through more with
+   `--offset` and watch the response's `has_more` flag.
+3. **`source`** - read the real source of a symbol you found.
+
 The one-shot flow (create and wait until ready in a single command):
 
 ```bash
-# open: create the KB and block until it is ready (prints the sessionId)
+# open: create the KB and block until it is ready (prints the sessionId).
+# `open` polls status for you until ready, so no separate status call is needed.
 scripts/kb.sh open https://github.com/pallets/click
 
 # or index the CURRENT working directory (any local path works, e.g. ../other-proj)
 scripts/kb.sh open .
 
-# orient first: languages, entry points, routes, hotspots, clusters
+# 1. orient first: languages, entry points, routes, hotspots, clusters.
+# bare `query` (no tool) defaults to architecture, so these two lines are equivalent:
 scripts/kb.sh query architecture
+scripts/kb.sh query
 
-# list functions (structural metadata, not raw file dumps)
+# 2. list functions (structural metadata, not raw file dumps)
 scripts/kb.sh query search_graph --label Function --limit 20
 
-# read the real source of a symbol (get its qualified_name from search_graph first)
+# 3. read the real source of a symbol (get its qualified_name from search_graph first)
 scripts/kb.sh source home-user-click.src.click.core.Command
-
-# trace who CALLS a function (inbound), two hops deep
-scripts/kb.sh query trace --function home-user-click.src.click.core.Command.main --direction inbound --depth 2
-
-# read a file the graph has no symbol for (config, README, module top-level)
-scripts/kb.sh cat pyproject.toml
-scripts/kb.sh cat src/click/core.py --from 1 --to 40
 
 # free the sandbox now (otherwise it expires on idle)
 scripts/kb.sh close
 ```
 
-### Which query tool to use
+That is the whole loop for most questions: `architecture` to orient, `search_graph`
+to locate, `source` to read. The tools below extend it when you need more.
 
-Pick the tool by intent. Reach for the cheapest one that answers the question, and
-prefer the structural tools over a raw `graph` query.
+### Advanced tools
+
+Beyond the three core tools, four more cover deeper structural work. Reach for the
+cheapest tool that answers the question, and prefer the structural tools over a raw
+`graph` query.
+
+```bash
+# search_code: grep for a string across the code
+scripts/kb.sh query search_code --pattern "def main"
+
+# trace who CALLS a function (inbound), two hops deep
+scripts/kb.sh query trace --function home-user-click.src.click.core.Command.main --direction inbound --depth 2
+
+# a bare (unqualified) function name is resolved server side: if exactly one symbol
+# matches it proceeds, otherwise the server errors and lists candidate qualified
+# names to disambiguate with (kb.sh prints them under a "candidates:" heading) -
+# pass a fully qualified name up front for common names to skip the round trip
+scripts/kb.sh query trace --function main --direction inbound --depth 2
+
+# schema: node labels + edge types (run this before an arbitrary graph query)
+scripts/kb.sh query schema
+
+# graph: an arbitrary read-only Cypher query
+scripts/kb.sh query graph --query "MATCH (f:Function) RETURN f.name LIMIT 10"
+
+# cat: read a file the graph has no symbol for (config, README, module top-level)
+scripts/kb.sh cat pyproject.toml
+scripts/kb.sh cat src/click/core.py --from 1 --to 40
+```
+
+Rows below the first group (`architecture`, `search_graph`, `source`) are the advanced
+tools - reach for them once the three core tools do not cover the question.
 
 | You want to                                     | Tool           | Key flags |
 | ----------------------------------------------- | -------------- | --------- |
-| Get oriented in an unfamiliar repo (start here) | `architecture` | (none) |
-| See what node labels and edge types exist       | `schema`       | (none; run before `graph`) |
-| List or filter symbols by structure             | `search_graph` | `--label`, `--name <re>`, `--file <re>`, `--limit`, `--offset` |
+| Get oriented in an unfamiliar repo (start here) | `architecture` | (none; the bare-`query` default) |
+| List or filter symbols by structure             | `search_graph` | `--label`, `--name <re>`, `--file <re>`, `--limit` (default 50), `--offset` |
 | Find dead code (unreferenced, non-entry)        | `search_graph` | `--max-degree 0 --exclude-entry-points` |
 | Find hotspots (most-connected symbols)          | `search_graph` | `--min-degree <n>` |
-| Grep for a string across the code               | `search_code`  | `--pattern <text>` |
 | Read the real source of a known symbol          | `source`       | `<qualified-name>` |
-| Read a file that is NOT a symbol (config, README, script, module top-level, a line range) | `cat` | `<path>`, `--from <n>`, `--to <n>` |
-| Trace call paths (callers or callees)           | `trace`        | `--function <qname>`, `--direction`, `--depth 1-5`, `--risk-labels` |
+| Grep for a string across the code               | `search_code`  | `--pattern <text>` |
+| Trace call paths (callers or callees)           | `trace`        | `--function <qname or bare name>`, `--direction`, `--depth 1-5`, `--risk-labels` |
+| See what node labels and edge types exist       | `schema`       | (none; run before `graph`) |
 | Run an arbitrary read-only graph query          | `graph`        | `--query "<cypher>"` (run `schema` first) |
+| Read a file that is NOT a symbol (config, README, script, module top-level, a line range) | `cat` | `<path>`, `--from <n>`, `--to <n>` |
 
 `trace --direction` takes `inbound` (who calls this), `outbound` (what this calls), or
 `both` (the default). `--risk-labels` tags each hop CRITICAL / HIGH / MEDIUM / LOW by
@@ -521,7 +558,7 @@ Output is capped at 64KB with a truncation warning on stderr; page a big file wi
 the thing you want IS a symbol - it returns exactly the definition, with structural
 metadata.
 
-A good default sweep for "understand this repo": run `architecture` to orient, `schema`
+A good deeper sweep for "understand this repo": run `architecture` to orient, `schema`
 to learn the labels, a few `search_graph` / `search_code` calls to locate the symbols
 you care about, then `source` / `trace` to go deep on them, and `cat` for the
 manifests and configs the graph does not index.

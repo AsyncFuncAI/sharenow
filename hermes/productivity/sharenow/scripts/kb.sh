@@ -39,11 +39,14 @@ Commands:
   open <repo-url|path> [--timeout <sec>]
                                       Create a KB from a public GitHub URL or a local
                                       directory (e.g. `.`) and wait until it is ready
-                                      (default timeout 60s). Prints the sessionId +
-                                      project and saves the session.
+                                      (default timeout 60s). Polls status for you until
+                                      ready, so no separate `status` call is needed here.
+                                      Prints the sessionId + project and saves the session.
   create <repo-url|path>              Create only (do not wait); prints sessionId + state.
-  status                              Print the current session's state (and project when ready).
-  query <tool> [args]                 Run a query against the ready session. Tools + args:
+  status                              Re-check the current session's state later (and project
+                                      when ready). `open` already polls until ready.
+  query [tool] [args]                 Run a query against the ready session. With no tool,
+                                      defaults to `architecture` (orient first). Tools + args:
                                         architecture                             orient: languages, entry points, routes, hotspots
                                         schema                                   node labels + edge types (run before `graph`)
                                         search_graph  [--label <L>] [--name <re>] [--file <re>]
@@ -112,7 +115,11 @@ fi
 
 if [[ -n "$CLIENT" ]]; then
   normalized_client=$(echo "$CLIENT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')
-  CLIENT_ARGS=(-H "x-sharenow-client: $normalized_client")
+  normalized_client="${normalized_client#-}"
+  normalized_client="${normalized_client%-}"
+  if [[ -n "$normalized_client" ]]; then
+    CLIENT_ARGS=(-H "x-sharenow-client: ${normalized_client}/kb-sh")
+  fi
 fi
 
 STATE_DIR=".sharenow"
@@ -134,6 +141,33 @@ current_session() {
   "$JQ_BIN" -r '.kb.current // ""' "$STATE_FILE" 2>/dev/null || echo ""
 }
 
+# Shared tail for api()/api_upload_gzip(): given the HTTP status and the temp file
+# holding the response body, either surface a clean error (non-2xx: prefer the JSON
+# `.error`/`.message`, else the raw body) or print the body and return. Removes the
+# temp file on every path.
+handle_api_response() {
+  local code="$1" tmp="$2"
+  if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
+    local err candidates
+    err=$("$JQ_BIN" -r '.error // .message // empty' "$tmp" 2>/dev/null || true)
+    [[ -n "$err" ]] || err="$(cat "$tmp")"
+    candidates=$("$JQ_BIN" -r '.details.candidates // [] | .[]' "$tmp" 2>/dev/null || true)
+    rm -f "$tmp"
+    if [[ -n "$candidates" ]]; then
+      echo "error: HTTP $code: $err" >&2
+      echo "candidates:" >&2
+      while IFS= read -r c; do
+        [[ -n "$c" ]] || continue
+        echo "  $c" >&2
+      done <<< "$candidates"
+      exit 1
+    fi
+    die "HTTP $code: $err"
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
 # Keyless HTTP call. Errors on a non-2xx and surfaces the JSON `.error`.
 api() {
   local method="$1"; shift
@@ -149,15 +183,7 @@ api() {
     code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" \
       "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}")
   fi
-  if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
-    local err
-    err=$("$JQ_BIN" -r '.error // .message // empty' "$tmp" 2>/dev/null || true)
-    [[ -n "$err" ]] || err="$(cat "$tmp")"
-    rm -f "$tmp"
-    die "HTTP $code: $err"
-  fi
-  cat "$tmp"
-  rm -f "$tmp"
+  handle_api_response "$code" "$tmp"
 }
 
 # Raw-body variant of api(): POSTs a file's bytes verbatim (application/gzip),
@@ -170,15 +196,7 @@ api_upload_gzip() {
   code=$(curl -sS -o "$tmp" -w "%{http_code}" -X POST "$url" \
     "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
     -H "content-type: application/gzip" --data-binary "@$file")
-  if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
-    local err
-    err=$("$JQ_BIN" -r '.error // .message // empty' "$tmp" 2>/dev/null || true)
-    [[ -n "$err" ]] || err="$(cat "$tmp")"
-    rm -f "$tmp"
-    die "HTTP $code: $err"
-  fi
-  cat "$tmp"
-  rm -f "$tmp"
+  handle_api_response "$code" "$tmp"
 }
 
 require_session() {
@@ -276,7 +294,7 @@ build_query_body() {
 assert_github_url() {
   local url="$1"
   [[ "$url" =~ ^https://github\.com/[^/]+/[^/]+/?$ || "$url" =~ ^https://github\.com/[^/]+/[^/]+\.git$ ]] \
-    || die "only public https://github.com/<owner>/<repo> URLs are accepted (got: $url)"
+    || die "only public https://github.com/<owner>/<repo> URLs are accepted (got: $url); a local directory path is also a valid target (e.g. kb.sh open .)"
 }
 
 # ── Local-directory targets (v1.2) ─────────────────────────────────────────────
@@ -452,9 +470,12 @@ cmd_open() {
   save_current_session "$id" "$TARGET_LABEL" ""
   echo "opening $TARGET_LABEL" >&2
   echo "sessionId: $id" >&2
-  # Poll status until ready | failed | timeout.
-  local waited=0 state project
-  while [[ "$waited" -lt "$timeout" ]]; do
+  # Poll status until ready | failed | timeout. Ramp the delay (0.5s, 1s, 2s, then
+  # a 3s cap) so a fast index is caught quickly while a slow one settles into the
+  # same steady cadence the old fixed sleep used. `waited` tracks real elapsed time
+  # (fractional-aware) so --timeout keeps its wall-clock meaning.
+  local waited=0 state project delay
+  while awk "BEGIN{exit !($waited < $timeout)}"; do
     resp=$(api GET "$BASE_URL/api/v1/kb/$id/status")
     state=$(echo "$resp" | "$JQ_BIN" -r '.state')
     case "$state" in
@@ -470,15 +491,25 @@ cmd_open() {
         die "indexing failed: $(echo "$resp" | "$JQ_BIN" -r '.error // "unknown error"')"
         ;;
     esac
-    sleep 3
-    waited=$((waited + 3))
+    # Backoff schedule: 0.5 -> 1 -> 2 -> 3 (capped). Derived from elapsed time so it
+    # holds regardless of how long each status round trip takes.
+    if   awk "BEGIN{exit !($waited < 0.5)}"; then delay=0.5
+    elif awk "BEGIN{exit !($waited < 1.5)}"; then delay=1
+    elif awk "BEGIN{exit !($waited < 3.5)}"; then delay=2
+    else delay=3
+    fi
+    sleep "$delay"
+    waited=$(awk "BEGIN{print $waited + $delay}")
   done
-  die "timed out after ${timeout}s waiting for ready (last state: ${state:-unknown}); check: kb.sh status"
+  die "timed out after ${timeout}s waiting for ready (last state: ${state:-unknown}); the session may still be provisioning, so re-check with: kb.sh status; if you are abandoning it, kb.sh close frees the sandbox"
 }
 
 cmd_query() {
-  [[ $# -ge 1 ]] || die "query requires a tool (architecture|schema|search_graph|search_code|source|trace|graph)"
-  local tool="$1"; shift
+  # Bare `query` (no tool) defaults to the architecture tool: the right first move
+  # for orienting in an unfamiliar repo. A named tool is passed through unchanged;
+  # an unknown tool still errors in build_query_body with the valid-tool list.
+  local tool="architecture"
+  if [[ $# -ge 1 ]]; then tool="$1"; shift; fi
   local sid body resp
   sid="$(require_session)"
   body=$(build_query_body "$tool" "$@")
