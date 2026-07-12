@@ -28,7 +28,7 @@ usage() {
   cat <<'USAGE'
 Usage: kb.sh [global options] <command> [args]
 
-Global options:
+Global options (accepted anywhere on the command line, before or after the command):
   --base-url <url>       API base (default: https://sharenow.today)
   --allow-nonsharenow-base-url
                          Allow talking to a non-default API base URL
@@ -112,18 +112,38 @@ command -v curl >/dev/null 2>&1 || die "requires curl"
 
 CLIENT_ARGS=()
 
+# Global options are accepted ANYWHERE on the command line, not just before the
+# command: agents habitually append `--client claude-code` after the subcommand
+# (the shape publish.sh accepts), and a "global flags first" rule kept failing
+# them with "unknown open option: --client". This pre-scan walks the whole argv
+# once, consumes the four global options wherever they appear, and keeps every
+# other argument in order for the command dispatch below.
+#
+# KB_VALUE_OPTS lists every value-taking SUBCOMMAND option, so an option's VALUE
+# is never misread as a global flag (e.g. `--name "--client"` stays a literal
+# name pattern). Keep it in sync when a subcommand gains a new value-taking
+# option; boolean options (--fresh, --exclude-entry-points, --risk-labels) need
+# no entry. Everything after a literal `--` is kept verbatim.
+KB_VALUE_OPTS=" --timeout --label --name --limit --offset --file --min-degree --max-degree --pattern --qualified-name --query --function --direction --depth --from --to "
+ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --base-url) BASE_URL="$2"; shift 2 ;;
+    --base-url) [[ $# -ge 2 ]] || die "--base-url requires a value"; BASE_URL="$2"; shift 2 ;;
     --allow-nonsharenow-base-url) ALLOW_NON_SHARENOW_BASE_URL=1; shift ;;
-    --session) SESSION_OVERRIDE="$2"; shift 2 ;;
-    --client) CLIENT="$2"; shift 2 ;;
+    --session) [[ $# -ge 2 ]] || die "--session requires a value"; SESSION_OVERRIDE="$2"; shift 2 ;;
+    --client) [[ $# -ge 2 ]] || die "--client requires a value"; CLIENT="$2"; shift 2 ;;
     -h|--help) usage ;;
-    --) shift; break ;;
-    -*) die "unknown global option: $1" ;;
-    *) break ;;
+    --) shift; ARGS+=("$@"); break ;;
+    *)
+      if [[ "$KB_VALUE_OPTS" == *" $1 "* && $# -ge 2 ]]; then
+        ARGS+=("$1" "$2"); shift 2
+      else
+        ARGS+=("$1"); shift
+      fi
+      ;;
   esac
 done
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
 [[ $# -ge 1 ]] || usage
 COMMAND="$1"; shift
