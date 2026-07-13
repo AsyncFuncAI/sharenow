@@ -72,6 +72,13 @@ Commands:
                                       top-level code that has no symbol). Output is
                                       capped at 64KB; page big files with --from/--to
                                       (1-based lines). Prefer `source` for symbols.
+  ui                                  Expose the graph visualization UI for the current
+                                      session: the server starts cbmem's embedded web UI
+                                      inside the session sandbox (idempotent; a repeat
+                                      call is a fast no-op) and this prints its public
+                                      URL on stdout. The URL is reachable by anyone
+                                      holding it and stops working when the session
+                                      expires or is closed.
   close                               Free the current session. A session THIS client
                                       provisioned fresh is DELETEd (frees the sandbox now).
                                       A session obtained via reuse is shared with other
@@ -635,6 +642,22 @@ cmd_cat() {
   echo "$resp" | "$JQ_BIN" -j '.result.content'
 }
 
+# Expose the graph visualization UI for the current session (POST /:id/ui). The
+# server ensures cbmem's embedded web UI is serving inside the session's sandbox
+# (idempotent: the first call starts it, repeats are a fast no-op) and returns its
+# public URL. The bare URL is printed alone on stdout so scripts can capture it
+# (`url=$(kb.sh ui)`); the human-facing note goes to stderr. The URL is public to
+# anyone holding it and dies with the session (close / idle expiry).
+cmd_ui() {
+  local sid resp url
+  sid="$(require_session)"
+  resp=$(api POST "$BASE_URL/api/v1/kb/$sid/ui")
+  url=$(echo "$resp" | "$JQ_BIN" -r '.url // empty')
+  [[ -n "$url" ]] || die "no url in ui response: $(echo "$resp" | head -c 300)"
+  echo "graph ui live (public link; expires with the session)" >&2
+  echo "$url"
+}
+
 # Read the recorded `reused` flag for a session id from state.json (default false
 # when there is no state file, no entry, or the field is absent).
 session_reused() {
@@ -682,6 +705,7 @@ case "$COMMAND" in
   source) cmd_source "$@" ;;
   context) cmd_context "$@" ;;
   cat)    cmd_cat "$@" ;;
+  ui)     cmd_ui "$@" ;;
   close)  cmd_close "$@" ;;
   *) die "unknown command: $COMMAND (see: kb.sh --help)" ;;
 esac

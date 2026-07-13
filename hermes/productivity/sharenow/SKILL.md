@@ -18,7 +18,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.8.2**
+**Skill version: 1.9.0**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
@@ -590,6 +590,27 @@ The active session is remembered in `.sharenow/state.json` under `.kb.current`, 
 `status`, `query`, `source`, `context`, `cat`, and `close` act on the last opened repo
 without repeating the id. Target a specific one with `--session {kb_...}` (or `$SHARENOW_KB_SESSION`).
 
+### Graph UI (a browsable 3D view of the code graph)
+
+When the user would benefit from SEEING the codebase - "show me the graph",
+"visualize this repo", "give me something I can explore in a browser" - expose the
+session's graph visualization UI:
+
+```bash
+scripts/kb.sh ui
+```
+
+It prints a public URL serving an interactive 3D view of the indexed code graph
+(nodes by label, call edges, dead-code filtering, per-node code preview). The first
+call starts the UI inside the session's sandbox (a second or two); repeats are an
+instant no-op that reprints the URL. Hand the URL to the user rather than trying to
+browse it yourself - it is a visual tool.
+
+Two things to tell the user when you share the link: the URL is reachable by anyone
+who has it (treat it like an unlisted link), and it stops working when the KB session
+closes or expires on idle - it is a live view into the ephemeral sandbox, not a
+published site.
+
 ### Session reuse on open
 
 A repeat `open` of the **same GitHub repo** is cheap: the server hands back an
@@ -635,6 +656,7 @@ filtering on them rather than assuming a fixed set.
 | `trace`        | `trace_path`       | `{ function, direction, callers[] and/or callees[] }` (per `--direction`: `inbound` fills `callers`, `outbound` fills `callees`, `both` fills both) |
 | `graph`        | `query_graph`      | `{ columns, rows, total }`: tabular rows for the Cypher query (shape follows your `RETURN` clause) |
 | `cat`          | (raw file read)    | raw file text on stdout, NOT JSON (it pipes like `cat`); truncation and hints go to stderr |
+| `ui`           | (graph UI)         | the public graph-UI URL alone on stdout (capture with `url=$(kb.sh ui)`); the note goes to stderr |
 
 Field sets beyond the top-level envelope are the engine's and can differ across engine
 versions and languages, so treat the columns above as the stable keys and inspect the
