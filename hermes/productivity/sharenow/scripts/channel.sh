@@ -47,6 +47,15 @@ Commands:
   claim                          Make the channel permanent (redeem the saved claim token)
   join <url-or-id> --as <name>   Join a channel with only its URL and a display name
   read [--as <name>] [--since <cursor>]  Long-poll the log; prints messages + the next cursor
+  watch [--as <name>] [--from <re>] [--type <re>] [--match <re>]
+        [--timeout <sec>] [--interval <sec>]
+                                 Poll the log until a MATCHING message arrives, print
+                                 the matching rows (JSON array), and exit 0. Quiet
+                                 polls log to stderr only; exit 2 on timeout (default
+                                 600s, interval 5s). Filters are jq regexes, ANDed.
+                                 Designed to run in a BACKGROUND shell: start it,
+                                 keep working, and its exit wakes you on a match -
+                                 nothing scrolls in the main terminal.
   feed [--as <name>] [--all] [--since <cursor>]  All rows incl. DMs (overlord view); needs the session
   send [--as <name>] <text>      Post a lobby message
   dm [--as <name>] <member> <text>  Send a private message to a member id
@@ -85,18 +94,38 @@ command -v curl >/dev/null 2>&1 || die "requires curl"
 # Shared HTTP response handling (needs JQ_BIN + die, both defined above).
 . "$SCRIPT_DIR/lib/http.sh"
 
+# Global options are accepted ANYWHERE on the command line, not just before the
+# command (the same pre-scan kb.sh uses): agents habitually append `--client
+# claude-code` after the subcommand, and a "global flags first" rule kept failing
+# them. The pre-scan walks the whole argv once, consumes the global options
+# wherever they appear, and keeps every other argument in order for the dispatch.
+#
+# CH_VALUE_OPTS lists every value-taking SUBCOMMAND option, so an option's VALUE
+# is never misread as a global flag (e.g. `--match "--client"` stays a literal
+# regex). Keep it in sync when a subcommand gains a new value-taking option;
+# boolean options (--all) need no entry. Everything after a literal `--` is kept
+# verbatim.
+CH_VALUE_OPTS=" --title --as --since --from --type --match --timeout --interval "
+ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --base-url) BASE_URL="$2"; shift 2 ;;
+    --base-url) [[ $# -ge 2 ]] || die "--base-url requires a value"; BASE_URL="$2"; shift 2 ;;
     --allow-nonsharenow-base-url) ALLOW_NON_SHARENOW_BASE_URL=1; shift ;;
-    --channel) CHANNEL="$2"; shift 2 ;;
-    --session) SESSION_OVERRIDE="$2"; shift 2 ;;
-    --client) CLIENT="$2"; shift 2 ;;
+    --channel) [[ $# -ge 2 ]] || die "--channel requires a value"; CHANNEL="$2"; shift 2 ;;
+    --session) [[ $# -ge 2 ]] || die "--session requires a value"; SESSION_OVERRIDE="$2"; shift 2 ;;
+    --client) [[ $# -ge 2 ]] || die "--client requires a value"; CLIENT="$2"; shift 2 ;;
     --help|-h) usage ;;
-    --*) die "unknown global option: $1" ;;
-    *) break ;;
+    --) shift; ARGS+=("$@"); break ;;
+    *)
+      if [[ "$CH_VALUE_OPTS" == *" $1 "* && $# -ge 2 ]]; then
+        ARGS+=("$1" "$2"); shift 2
+      else
+        ARGS+=("$1"); shift
+      fi
+      ;;
   esac
 done
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
 CMD="${1:-}"
 [[ -n "$CMD" ]] || usage
@@ -484,6 +513,70 @@ case "$CMD" in
     # Persist the returned cursor per member so each identity resumes independently.
     cursor_save "$id" "$name" "$cursor"
     echo "$resp" | "$JQ_BIN" .
+    ;;
+  watch)
+    # Wait for a MATCHING message without polluting the agent's main terminal:
+    # a self-terminating poll loop DESIGNED to run in a harness background shell
+    # (run_in_background or equivalent). The agent starts it, keeps working, and
+    # is woken by the shell's exit the moment a match lands - no foreground
+    # read-loop scrolling through the conversation.
+    #
+    # Each cycle is one long-poll `read` on this member's saved cursor, and the
+    # cursor is persisted exactly like `read` - so every scanned row (matching
+    # or not) is CONSUMED: it will not reappear in later read/watch calls for
+    # this identity. Filters AND together; each is a jq regex (test()):
+    #   --from  <re>  against the sender memberId
+    #   --type  <re>  against the row type (msg, dm, fs, task, ...)
+    #   --match <re>  against the body (an object body is matched as JSON text)
+    # Output discipline: liveness ("poll N quiet") goes to STDERR; STDOUT
+    # carries ONLY the matching rows (a JSON array) when they arrive.
+    # Exit codes: 0 = matched, 2 = timed out quiet, 1 = error.
+    from_re=""; type_re=""; match_re=""; timeout=600; interval=5
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --as) AS_NAME="$2"; shift 2 ;;
+        --from) from_re="$2"; shift 2 ;;
+        --type) type_re="$2"; shift 2 ;;
+        --match) match_re="$2"; shift 2 ;;
+        --timeout) timeout="$2"; shift 2 ;;
+        --interval) interval="$2"; shift 2 ;;
+        *) die "unexpected watch argument: $1" ;;
+      esac
+    done
+    id=$(resolve_channel)
+    name=$(resolve_member "$id")
+    session=$(session_for "$id" "$name")
+    # Elapsed time via $SECONDS (wall clock), not a sum of sleeps: each poll may
+    # sit in the server's long-poll hold, and --timeout must mean real time.
+    watch_start=$SECONDS
+    poll=0
+    while [[ $((SECONDS - watch_start)) -lt "$timeout" ]]; do
+      poll=$((poll + 1))
+      since=$(cursor_for "$id" "$name")
+      url="$BASE_URL/api/v1/channels/$id/messages"
+      if [[ -n "$since" ]]; then
+        url="$url?since=$("$JQ_BIN" -nr --arg v "$since" '$v|@uri')"
+      fi
+      resp=$(api_session "$session" GET "$url")
+      cursor=$(echo "$resp" | "$JQ_BIN" -r '.cursor // ""')
+      cursor_save "$id" "$name" "$cursor"
+      matches=$(echo "$resp" | "$JQ_BIN" -c \
+        --arg from "$from_re" --arg type "$type_re" --arg match "$match_re" '
+        [ .messages[]?
+          | select($from == "" or ((.memberId // "") | test($from)))
+          | select($type == "" or ((.type // "") | test($type)))
+          | select($match == "" or ((.body | if type == "string" then . else tojson end) | test($match)))
+        ]') || die "watch filter failed (invalid --from/--type/--match regex?)"
+      if [[ "$matches" != "[]" ]]; then
+        echo "watch: match on poll $poll ($((SECONDS - watch_start))s)" >&2
+        echo "$matches" | "$JQ_BIN" .
+        exit 0
+      fi
+      echo "watch: poll $poll quiet ($((SECONDS - watch_start))s/${timeout}s)" >&2
+      sleep "$interval"
+    done
+    echo "watch: timed out after ${timeout}s with no matching message (cursor saved; rerun watch or read to continue from here)" >&2
+    exit 2
     ;;
   feed)
     # The overlord (all-DM) backlog: the agent analog of the creator's browser

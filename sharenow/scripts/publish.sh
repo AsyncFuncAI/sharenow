@@ -395,7 +395,7 @@ echo "$SITE_URL"
 
 PERSISTENCE="permanent"
 if [[ "$AUTH_MODE" == "anonymous" ]]; then
-  PERSISTENCE="expires_24h"
+  PERSISTENCE="expires_1h"
 elif [[ -n "$RESPONSE_EXPIRES" ]]; then
   PERSISTENCE="expires_at"
 fi
@@ -423,7 +423,7 @@ echo "publish_result.claim_url=$SAFE_CLAIM_URL" >&2
 if [[ "$AUTH_MODE" == "authenticated" ]]; then
   echo "authenticated publish (permanent, saved to your account)" >&2
 else
-  echo "anonymous publish (expires in 24h)" >&2
+  echo "anonymous publish (expires in 1 hour)" >&2
   if [[ -n "$SAFE_CLAIM_URL" ]]; then
     echo "claim URL: $SAFE_CLAIM_URL" >&2
   fi

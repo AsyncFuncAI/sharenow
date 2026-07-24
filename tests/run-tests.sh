@@ -333,6 +333,13 @@ assert_run "publish happy path prints URL" 0 "abc.sharenow.today" -- \
   env STUB_CURL_BODY="$PUB_BODY" SHARENOW_API_KEY=test-key \
     /bin/bash "$SCRIPTS/publish.sh" "$pub_wd/index.html"
 
+# Anonymous Sites stay public for one hour; the private claim URL remains the
+# recovery path after that public window closes.
+pub_anon_home="$(new_workdir)"
+assert_run "anonymous publish reports one-hour public lifetime" 0 "publish_result.persistence=expires_1h" -- \
+  env HOME="$pub_anon_home" STUB_CURL_BODY="$PUB_BODY" \
+    /bin/bash "$SCRIPTS/publish.sh" "$pub_wd/index.html"
+
 echo "# --- smoke: drive.sh ---"
 # Missing credentials -> die (no api-key, no token, no creds file under fake HOME).
 assert_run "drive missing creds" 1 "missing credentials" -- \
@@ -362,8 +369,10 @@ echo "# --- smoke: channel.sh ---"
 # No command -> usage.
 assert_run "channel no command -> usage" 1 "Usage: channel.sh" -- \
   /bin/bash "$SCRIPTS/channel.sh"
-# Unknown global option -> die.
-assert_run "channel unknown option" 1 "unknown global option" -- \
+# An unknown flag is no longer a global-parse error (globals are pre-scanned and
+# may appear anywhere, like kb.sh): it falls through to the dispatch as a bogus
+# command and dies there.
+assert_run "channel unknown flag dies at dispatch" 1 "unknown command" -- \
   /bin/bash "$SCRIPTS/channel.sh" --bogus
 # Happy path: `channel.sh create` (keyless) with a stubbed create response.
 # `create` takes --title/--as (no positional title); it prints the overlord URL on
@@ -374,6 +383,58 @@ CHAN_CREATE_BODY='{"channelId":"ch_new","sessionToken":"tok","channelUrl":"https
 assert_run "channel create happy path" 0 "ch_new" -- \
   env STUB_CURL_BODY="$CHAN_CREATE_BODY" \
     bash -c 'cd "$1" && shift && /bin/bash "$@"' _ "$chan_wd" "$SCRIPTS/channel.sh" create --title "My Channel" --as boss
+# Global flags AFTER the subcommand are accepted (the kb.sh v1.8.2 fix, applied
+# here too): --client past `create` must parse as the global it is, not as an
+# unexpected create argument. The stubbed create proves the whole path runs.
+chan_trail_wd="$(new_workdir)"
+assert_run "channel global --client after subcommand parses" 0 "ch_new" -- \
+  env STUB_CURL_BODY="$CHAN_CREATE_BODY" \
+    bash -c 'cd "$1" && shift && /bin/bash "$@"' _ "$chan_trail_wd" "$SCRIPTS/channel.sh" create --title "T" --as boss --client claude-code
+
+# ==========================================================================
+# STEP 1e-watch: channel.sh watch - the background-shell reply-waiter (v1.10).
+# The stub returns ONE canned body for every poll, so: a matching body must exit 0
+# on the first poll with ONLY the matching rows on stdout; an empty page must loop
+# quietly (stderr) until --timeout and exit 2; filters must exclude non-matches.
+# ==========================================================================
+echo "# --- channel.sh watch (background reply-waiter) ---"
+
+watch_wd="$(new_workdir)"
+mkdir -p "$watch_wd/.sharenow"
+# Seed a joined-member state: current channel + one saved identity with a session.
+printf '%s' '{"channels":{"current":"ch_w","byId":{"ch_w":{"currentMember":"me","members":{"me":{"sessionToken":"tok","memberId":"chm_me","cursor":""}}}}}}' \
+  > "$watch_wd/.sharenow/state.json"
+
+WATCH_HIT_BODY='{"messages":[{"id":"m1","type":"msg","memberId":"chm_boss","recipientId":null,"body":"work is done","createdAt":"2026-07-12T00:00:00Z"},{"id":"m2","type":"msg","memberId":"chm_other","recipientId":null,"body":"unrelated chatter","createdAt":"2026-07-12T00:00:01Z"}],"cursor":"m2"}'
+WATCH_QUIET_BODY='{"messages":[],"cursor":"m0"}'
+
+run_watch() {
+  # $1 = canned body ; rest = watch args
+  local body="$1"; shift
+  ( cd "$watch_wd" && STUB_CURL_BODY="$body" /bin/bash "$SCRIPTS/channel.sh" watch "$@" )
+}
+
+# A matching row -> exit 0 and the match is printed.
+assert_run "watch matches on --from and exits 0" 0 "work is done" -- \
+  run_watch "$WATCH_HIT_BODY" --from chm_boss --timeout 5 --interval 0.2
+# The filter must EXCLUDE the non-matching sender's row on stdout (stderr may
+# carry liveness lines, so check stdout alone).
+watch_out="$(run_watch "$WATCH_HIT_BODY" --from chm_boss --timeout 5 --interval 0.2 2>/dev/null)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if printf '%s' "$watch_out" | grep -q "unrelated chatter"; then
+  TESTS_FAIL=$((TESTS_FAIL + 1)); echo "not ok $TESTS_RUN - watch stdout leaks non-matching rows"
+else
+  echo "ok $TESTS_RUN - watch stdout carries only matching rows"
+fi
+# --match on body text works too.
+assert_run "watch matches on --match body regex" 0 "chm_boss" -- \
+  run_watch "$WATCH_HIT_BODY" --match "done|blocked" --timeout 5 --interval 0.2
+# All-quiet pages -> quiet stderr liveness + exit 2 at --timeout.
+assert_run "watch quiet pages time out with exit 2" 2 "timed out" -- \
+  run_watch "$WATCH_QUIET_BODY" --from chm_boss --timeout 1 --interval 0.3
+# An unknown option dies with the watch usage error.
+assert_run "watch unknown option dies" 1 "unexpected watch argument" -- \
+  run_watch "$WATCH_QUIET_BODY" --bogus
 
 # ==========================================================================
 # STEP 1f: kb.sh session reuse (open/close/--fresh) via the real CLI + stub curl.

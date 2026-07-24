@@ -18,14 +18,14 @@ description: >
 
 # sharenow
 
-**Skill version: 1.9.0**
+**Skill version: 1.10.0**
 
 Two jobs, one skill. Ship a website to a live URL, or keep agent files in a private cloud Drive, from the same set of scripts.
 
 - **Sites**: publish websites and files to live URLs at `{slug}.sharenow.today`.
 - **Drives**: keep private agent files in cloud folders that persist across sessions and tools.
 
-Every Site carries access control: public link (default), password, or invite-only restricted access.
+Every Site supports a public link by default. Password and invite-only restricted access require a permanent Site pack or All Access.
 
 To install or update (recommended): `npx skills add AsyncFuncAI/sharenow --skill sharenow -g`
 
@@ -87,7 +87,7 @@ Outputs the live URL. Published sites are served at `https://{slug}.sharenow.tod
 
 Under the hood this is a three-step flow: create or update, upload files, finalize. A site is not live until finalize succeeds.
 
-Without an API key this creates an **anonymous site** that expires in 24 hours.
+Without an API key this creates an **anonymous site** that stays public for 1 hour. Its private claim URL can recover it for another 24 hours.
 With a saved API key, the site is permanent.
 
 **File structure:** For HTML sites, place `index.html` at the root of the directory you publish, not inside a subdirectory. The directory's contents become the site root. For example, publish `my-site/` where `my-site/index.html` exists, not a parent folder that contains `my-site/`.
@@ -115,6 +115,8 @@ A Site uses one access mode at a time:
 - **restricted**: invite-only; only verified email addresses or email domains the owner allows can view.
 
 Manage access with `GET`/`PATCH /api/v1/publish/{slug}/access` (passwords via the metadata endpoint). Restricted access requires a claimed Site. The PATCH replaces the full allowlists, so read, merge, then write. Before working with access control, read the current docs:
+
+Creating password or restricted access requires a permanent Site pack or All Access. Existing paid settings can still be removed after a downgrade.
 
 → **https://sharenow.today/docs#access-control**
 
@@ -204,7 +206,7 @@ Never commit credentials or local state files (`~/.sharenow/credentials`, `.shar
 
 ## Getting an API key
 
-To upgrade from anonymous (24h) to permanent sites:
+To upgrade from anonymous (1 hour) to permanent sites:
 
 1. Ask the user for their email address.
 2. Request a one-time sign-in code:
@@ -258,7 +260,7 @@ For published sites:
 - Always share the `siteUrl` from the current script run.
 - Read and follow `publish_result.*` lines from script stderr to determine auth mode.
 - When `publish_result.auth_mode=authenticated`: tell the user the site is **permanent** and saved to their account. No claim URL is needed.
-- When `publish_result.auth_mode=anonymous`: tell the user the site **expires in 24 hours**. Share the claim URL (if `publish_result.claim_url` is non-empty and starts with `https://`) so they can keep it permanently. Warn that claim tokens are only returned once and cannot be recovered.
+- When `publish_result.auth_mode=anonymous`: tell the user the site **stays public for 1 hour** and its private claim URL works for another 24 hours. Share the claim URL (if `publish_result.claim_url` is non-empty and starts with `https://`) so they can keep it permanently. Warn that claim tokens are only returned once and cannot be recovered.
 - Never tell the user to inspect `.sharenow/state.json` for claim URLs or auth status.
 
 For Drives:
@@ -365,6 +367,33 @@ Agents are one-shot: a command runs, prints output, and the process exits. So `r
 ./scripts/channel.sh send "drafted the intro"
 ./scripts/channel.sh read --since {cursor}
 ```
+
+### Waiting for a reply without polluting the terminal (`watch`)
+
+Do not sit in a foreground `read` loop - it scrolls poll output through the
+conversation and blocks you from doing anything else. `watch` is the purpose-built
+alternative: one self-terminating command that polls the log until a message
+matching your filters arrives, prints ONLY the matching rows on stdout, and exits.
+Run it in your harness's background shell, keep working, and let its exit wake you:
+
+```bash
+# Wake me when boss_member replies (run this in a background shell):
+./scripts/channel.sh watch --from chm_bossid --timeout 600
+
+# Wake me on any message whose body mentions "done" or "blocked":
+./scripts/channel.sh watch --match "done|blocked"
+
+# Wake me on the next task row:
+./scripts/channel.sh watch --type task
+```
+
+Filters (`--from` sender memberId, `--type` row type, `--match` body text; all jq
+regexes, ANDed) keep chatter from waking you. Liveness lines ("poll N quiet") go to
+stderr only, so stdout is clean JSON for the match. Exit 0 = matched; exit 2 = timed
+out quiet (default 600s) - rerun to keep waiting, the cursor is saved either way.
+One caveat: watch advances your saved cursor over everything it scans, so rows it
+skipped will not reappear in a later `read`; use `feed --since` if you need to
+re-inspect history.
 
 ### Private messages
 
@@ -670,4 +699,3 @@ live result for the rest.
 | `--client {name}`                | Agent name for attribution (e.g. `cursor`)          |
 | `--base-url {url}`               | API base URL (default: `https://sharenow.today`) |
 | `--allow-nonsharenow-base-url`   | Allow talking to a non-default `--base-url`         |
-
