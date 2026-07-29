@@ -20,6 +20,8 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 SCRIPTS="$REPO_ROOT/sharenow/scripts"
+KB_SCRIPT="$REPO_ROOT/extras/advanced-scripts/kb.sh"
+CHANNEL_SCRIPT="$REPO_ROOT/extras/advanced-scripts/channel.sh"
 STUBS="$HERE/stubs"
 
 # A private HOME + workdir so no test can read real credentials or write real state.
@@ -121,7 +123,7 @@ KB_FUNC_LIB="$WORK/kb_build_query_body.sh"
   echo 'die() { echo "error: $1" >&2; exit 1; }'
   # Pull the build_query_body function body out of kb.sh by line range between its
   # definition and the matching closing brace at column 0.
-  awk '/^build_query_body\(\) \{/{f=1} f{print} /^\}/{if(f){exit}}' "$SCRIPTS/kb.sh"
+  awk '/^build_query_body\(\) \{/{f=1} f{print} /^\}/{if(f){exit}}' "$KB_SCRIPT"
 } > "$KB_FUNC_LIB"
 
 kb_body() {
@@ -244,10 +246,17 @@ esac
 # fix: its old copy used `.error // empty` and dropped a .message-only error).
 assert_run "shared lib has .message fallback (drive.sh fix)" 1 "HTTP 422: msg only" -- \
   call_handle 422 '{"message":"msg only"}'
-# All five scripts must source the shared lib.
-for s in kb drive account channel publish; do
+# Installed and parked helpers must source their colocated shared lib.
+for entry in \
+  "kb:$KB_SCRIPT" \
+  "drive:$SCRIPTS/drive.sh" \
+  "account:$SCRIPTS/account.sh" \
+  "channel:$CHANNEL_SCRIPT" \
+  "publish:$SCRIPTS/publish.sh"; do
+  s="${entry%%:*}"
+  script="${entry#*:}"
   TESTS_RUN=$((TESTS_RUN + 1))
-  if grep -q 'lib/http.sh' "$SCRIPTS/$s.sh"; then
+  if grep -q 'lib/http.sh' "$script"; then
     echo "ok $TESTS_RUN - $s.sh sources lib/http.sh"
   else
     TESTS_FAIL=$((TESTS_FAIL + 1)); echo "not ok $TESTS_RUN - $s.sh does not source lib/http.sh"
@@ -270,7 +279,7 @@ printf '%s' '{"kb":{"current":"kb_test","byId":{"kb_test":{"repoUrl":"x","projec
 run_kb_query() {
   # $1 = canned result body ; rest = kb query args
   local body="$1"; shift
-  ( cd "$kb_query_wd" && STUB_CURL_BODY="$body" /bin/bash "$SCRIPTS/kb.sh" query "$@" )
+  ( cd "$kb_query_wd" && STUB_CURL_BODY="$body" /bin/bash "$KB_SCRIPT" query "$@" )
 }
 
 # Empty results array -> hint on stderr, exit 0.
@@ -279,7 +288,7 @@ assert_run "kb empty results emits hint" 0 "hint: no results" -- \
 # Non-empty results -> NO hint (assert the hint substring is absent by checking a
 # marker we DO expect and that stderr has no 'hint:').
 kb_out="$( ( cd "$kb_query_wd" && STUB_CURL_BODY='{"result":{"results":[{"name":"x"}]}}' \
-  /bin/bash "$SCRIPTS/kb.sh" query search_graph --label Yes ) 2>"$WORK/kbe" ; )"
+  /bin/bash "$KB_SCRIPT" query search_graph --label Yes ) 2>"$WORK/kbe" ; )"
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -q 'hint:' "$WORK/kbe"; then
   TESTS_FAIL=$((TESTS_FAIL + 1)); echo "not ok $TESTS_RUN - kb non-empty results stays silent"
@@ -330,7 +339,7 @@ echo '<h1>hi</h1>' > "$pub_wd/index.html"
 # The create response must carry slug/upload/siteUrl; finalize response is read too.
 PUB_BODY='{"slug":"abc","siteUrl":"https://abc.sharenow.today","upload":{"versionId":"v1","finalizeUrl":"https://sharenow.today/fin","uploads":[],"skipped":[]}}'
 assert_run "publish happy path prints URL" 0 "abc.sharenow.today" -- \
-  env STUB_CURL_BODY="$PUB_BODY" SHARENOW_API_KEY=test-key \
+  env STUB_CURL_BODY="$PUB_BODY" SHARENOW_API_KEY=snk_test_key_12345678901234567890 \
     /bin/bash "$SCRIPTS/publish.sh" "$pub_wd/index.html"
 
 # Anonymous Sites stay public for one hour; the private claim URL remains the
@@ -349,7 +358,7 @@ assert_run "drive unknown option" 1 "unknown global option" -- \
   /bin/bash "$SCRIPTS/drive.sh" --bogus ls
 # Happy path: `drive.sh ls` with a stubbed drive list, api key via env.
 assert_run "drive ls happy path" 0 "drv_1" -- \
-  env STUB_CURL_BODY='{"drives":[{"id":"drv_1","name":"My Drive"}]}' SHARENOW_API_KEY=test-key \
+  env STUB_CURL_BODY='{"drives":[{"id":"drv_1","name":"My Drive"}]}' SHARENOW_API_KEY=snk_test_key_12345678901234567890 \
     /bin/bash "$SCRIPTS/drive.sh" ls
 
 echo "# --- smoke: account.sh ---"
@@ -358,22 +367,22 @@ assert_run "account missing creds" 1 "missing credentials" -- \
   /bin/bash "$SCRIPTS/account.sh" sites
 # Unknown command -> handled by the case default (die) after auth; give it creds.
 assert_run "account unknown command" 1 "-" -- \
-  env SHARENOW_API_KEY=test-key STUB_CURL_BODY='{}' \
+  env SHARENOW_API_KEY=snk_test_key_12345678901234567890 STUB_CURL_BODY='{}' \
     /bin/bash "$SCRIPTS/account.sh" not-a-real-command
 # Happy path: `account.sh sites` with stubbed publishes list.
 assert_run "account sites happy path" 0 "myslug" -- \
-  env SHARENOW_API_KEY=test-key STUB_CURL_BODY='{"publishes":[{"slug":"myslug"}]}' \
+  env SHARENOW_API_KEY=snk_test_key_12345678901234567890 STUB_CURL_BODY='{"publishes":[{"slug":"myslug"}]}' \
     /bin/bash "$SCRIPTS/account.sh" sites
 
 echo "# --- smoke: channel.sh ---"
 # No command -> usage.
 assert_run "channel no command -> usage" 1 "Usage: channel.sh" -- \
-  /bin/bash "$SCRIPTS/channel.sh"
+  /bin/bash "$CHANNEL_SCRIPT"
 # An unknown flag is no longer a global-parse error (globals are pre-scanned and
 # may appear anywhere, like kb.sh): it falls through to the dispatch as a bogus
 # command and dies there.
 assert_run "channel unknown flag dies at dispatch" 1 "unknown command" -- \
-  /bin/bash "$SCRIPTS/channel.sh" --bogus
+  /bin/bash "$CHANNEL_SCRIPT" --bogus
 # Happy path: `channel.sh create` (keyless) with a stubbed create response.
 # `create` takes --title/--as (no positional title); it prints the overlord URL on
 # stdout and channel_result.* lines on stderr. Response uses channelId/channelUrl/
@@ -382,14 +391,14 @@ chan_wd="$(new_workdir)"
 CHAN_CREATE_BODY='{"channelId":"ch_new","sessionToken":"tok","channelUrl":"https://sharenow.today/ch/ch_new","overlordUrl":"https://sharenow.today/ch/ch_new#tok","joinUrl":"https://sharenow.today/ch/ch_new"}'
 assert_run "channel create happy path" 0 "ch_new" -- \
   env STUB_CURL_BODY="$CHAN_CREATE_BODY" \
-    bash -c 'cd "$1" && shift && /bin/bash "$@"' _ "$chan_wd" "$SCRIPTS/channel.sh" create --title "My Channel" --as boss
+    bash -c 'cd "$1" && shift && /bin/bash "$@"' _ "$chan_wd" "$CHANNEL_SCRIPT" create --title "My Channel" --as boss
 # Global flags AFTER the subcommand are accepted (the kb.sh v1.8.2 fix, applied
 # here too): --client past `create` must parse as the global it is, not as an
 # unexpected create argument. The stubbed create proves the whole path runs.
 chan_trail_wd="$(new_workdir)"
 assert_run "channel global --client after subcommand parses" 0 "ch_new" -- \
   env STUB_CURL_BODY="$CHAN_CREATE_BODY" \
-    bash -c 'cd "$1" && shift && /bin/bash "$@"' _ "$chan_trail_wd" "$SCRIPTS/channel.sh" create --title "T" --as boss --client claude-code
+    bash -c 'cd "$1" && shift && /bin/bash "$@"' _ "$chan_trail_wd" "$CHANNEL_SCRIPT" create --title "T" --as boss --client claude-code
 
 # ==========================================================================
 # STEP 1e-watch: channel.sh watch - the background-shell reply-waiter (v1.10).
@@ -411,7 +420,7 @@ WATCH_QUIET_BODY='{"messages":[],"cursor":"m0"}'
 run_watch() {
   # $1 = canned body ; rest = watch args
   local body="$1"; shift
-  ( cd "$watch_wd" && STUB_CURL_BODY="$body" /bin/bash "$SCRIPTS/channel.sh" watch "$@" )
+  ( cd "$watch_wd" && STUB_CURL_BODY="$body" /bin/bash "$CHANNEL_SCRIPT" watch "$@" )
 }
 
 # A matching row -> exit 0 and the match is printed.
@@ -453,7 +462,7 @@ echo "# --- kb.sh session reuse (open/close/--fresh) ---"
 reuse_wd="$(new_workdir)"
 REUSED_BODY='{"sessionId":"kb_reused","slug":"s","state":"ready","reused":true,"project":"proj"}'
 reuse_out="$( ( cd "$reuse_wd" && STUB_CURL_BODY="$REUSED_BODY" \
-  /bin/bash "$SCRIPTS/kb.sh" open https://github.com/o/r ) 2>"$WORK/reuse_err" )"
+  /bin/bash "$KB_SCRIPT" open https://github.com/o/r ) 2>"$WORK/reuse_err" )"
 # The "reused: true" line goes to stderr (after the ready line).
 assert_eq "open reused prints reused line" "yes" \
   "$(grep -q 'reused: true' "$WORK/reuse_err" && echo yes || echo no)"
@@ -465,7 +474,7 @@ assert_eq "open records reused in state" "true" \
 # the request log on; assert no DELETE line and that .kb.current was cleared.
 : > "$WORK/reuse_reqlog"
 close_out="$( ( cd "$reuse_wd" && STUB_CURL_LOG="$WORK/reuse_reqlog" STUB_CURL_BODY='{}' \
-  /bin/bash "$SCRIPTS/kb.sh" close ) 2>"$WORK/reuse_close_err" )"
+  /bin/bash "$KB_SCRIPT" close ) 2>"$WORK/reuse_close_err" )"
 assert_eq "close on reused session issues NO DELETE" "0" \
   "$(grep -c '^DELETE' "$WORK/reuse_reqlog" 2>/dev/null | tr -d '[:space:]')"
 assert_eq "close on reused session says shared/detached" "yes" \
@@ -477,13 +486,13 @@ assert_eq "close on reused session clears .kb.current" "null" \
 fresh_wd="$(new_workdir)"
 FRESH_BODY='{"sessionId":"kb_fresh","slug":"s","state":"ready","project":"proj"}'
 ( cd "$fresh_wd" && STUB_CURL_BODY="$FRESH_BODY" \
-  /bin/bash "$SCRIPTS/kb.sh" open https://github.com/o/r ) >/dev/null 2>&1
+  /bin/bash "$KB_SCRIPT" open https://github.com/o/r ) >/dev/null 2>&1
 assert_eq "fresh open records reused:false in state" "false" \
   "$(jq -r '.kb.byId.kb_fresh.reused' "$fresh_wd/.sharenow/state.json")"
 : > "$WORK/fresh_reqlog"
 ( cd "$fresh_wd" && STUB_CURL_LOG="$WORK/fresh_reqlog" \
   STUB_CURL_BODY='{"sessionId":"kb_fresh","state":"deleted"}' \
-  /bin/bash "$SCRIPTS/kb.sh" close ) >/dev/null 2>&1
+  /bin/bash "$KB_SCRIPT" close ) >/dev/null 2>&1
 assert_eq "close on fresh session issues a DELETE" "1" \
   "$(grep -c '^DELETE' "$WORK/fresh_reqlog" 2>/dev/null | tr -d '[:space:]')"
 
@@ -492,7 +501,7 @@ fflag_wd="$(new_workdir)"
 : > "$WORK/fresh_bodylog"
 ( cd "$fflag_wd" && STUB_CURL_BODY_LOG="$WORK/fresh_bodylog" \
   STUB_CURL_BODY="$FRESH_BODY" \
-  /bin/bash "$SCRIPTS/kb.sh" open https://github.com/o/r --fresh ) >/dev/null 2>&1
+  /bin/bash "$KB_SCRIPT" open https://github.com/o/r --fresh ) >/dev/null 2>&1
 # The first logged body is the create POST. Assert it carries fresh:true.
 assert_eq "open --fresh sends fresh:true in create body" "true" \
   "$(head -n1 "$WORK/fresh_bodylog" | jq -r '.fresh')"
@@ -503,7 +512,7 @@ plain_wd="$(new_workdir)"
 : > "$WORK/plain_bodylog"
 ( cd "$plain_wd" && STUB_CURL_BODY_LOG="$WORK/plain_bodylog" \
   STUB_CURL_BODY="$FRESH_BODY" \
-  /bin/bash "$SCRIPTS/kb.sh" open https://github.com/o/r ) >/dev/null 2>&1
+  /bin/bash "$KB_SCRIPT" open https://github.com/o/r ) >/dev/null 2>&1
 assert_eq "plain open omits fresh from create body" "null" \
   "$(head -n1 "$WORK/plain_bodylog" | jq -r '.fresh')"
 
@@ -519,7 +528,7 @@ race_wd="$(new_workdir)"
 run_writer() {
   local sid="$1"
   ( cd "$race_wd" && STUB_CURL_BODY="{\"sessionId\":\"$sid\",\"slug\":\"s\",\"state\":\"provisioning\"}" \
-    /bin/bash "$SCRIPTS/kb.sh" create https://github.com/o/r >/dev/null 2>&1 )
+    /bin/bash "$KB_SCRIPT" create https://github.com/o/r >/dev/null 2>&1 )
 }
 i=0
 while [[ $i -lt 8 ]]; do
@@ -557,7 +566,7 @@ crace_wd="$(new_workdir)"
 run_cwriter() {
   local n="$1"
   ( cd "$crace_wd" && STUB_CURL_BODY="{\"channelId\":\"ch_$n\",\"sessionToken\":\"tok$n\",\"channelUrl\":\"https://sharenow.today/ch/ch_$n\",\"overlordUrl\":\"https://sharenow.today/ch/ch_$n#t\",\"joinUrl\":\"https://sharenow.today/ch/ch_$n\"}" \
-    /bin/bash "$SCRIPTS/channel.sh" create --title "C$n" --as "a$n" >/dev/null 2>&1 )
+    /bin/bash "$CHANNEL_SCRIPT" create --title "C$n" --as "a$n" >/dev/null 2>&1 )
 }
 i=0
 while [[ $i -lt 8 ]]; do
@@ -574,6 +583,84 @@ else
   echo "not ok $TESTS_RUN - channel concurrent writes corrupted state.json"
   echo "#   content: $(head -c 300 "$crace_wd/.sharenow/state.json" 2>/dev/null | tr '\n' ' ')"
 fi
+
+# ==========================================================================
+# STEP 3: one-install least-privilege boundary.
+# ==========================================================================
+echo "# --- one-install least-privilege package boundary ---"
+
+installed_files="$(
+  cd "$REPO_ROOT/sharenow" &&
+    find . -type f ! -name '.DS_Store' -print | LC_ALL=C sort
+)"
+expected_installed_files="$(printf '%s\n' \
+  './AGENTS.md' \
+  './SKILL.md' \
+  './assets/logo.svg' \
+  './scripts/account.sh' \
+  './scripts/drive.sh' \
+  './scripts/lib/http.sh' \
+  './scripts/publish.sh')"
+assert_eq "one install contains the reviewed publish, Drive, and account helpers" \
+  "$expected_installed_files" "$installed_files"
+assert_eq "channel helper is parked outside the installed skill" "no" \
+  "$([[ -e "$REPO_ROOT/sharenow/scripts/channel.sh" ]] && echo yes || echo no)"
+assert_eq "local-codebase KB helper is parked outside the installed skill" "no" \
+  "$([[ -e "$REPO_ROOT/sharenow/scripts/kb.sh" ]] && echo yes || echo no)"
+assert_eq "parked channel helper is preserved" "yes" \
+  "$([[ -f "$CHANNEL_SCRIPT" ]] && echo yes || echo no)"
+assert_eq "parked KB helper is preserved" "yes" \
+  "$([[ -f "$KB_SCRIPT" ]] && echo yes || echo no)"
+
+unsafe_instruction_pattern='request-code|verify-code|paste (it|the code)|keys create|--api-key|--base-url|allow-nonsharenow-base-url'
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -REin "$unsafe_instruction_pattern" "$REPO_ROOT/sharenow" >/dev/null 2>&1; then
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - installed skill contains agent-visible credential or alternate-host instructions"
+else
+  echo "ok $TESTS_RUN - installed skill has no agent-visible OTP, key argument, or alternate-host instructions"
+fi
+
+login_home="$(new_workdir)"
+login_log="$WORK/login.requests"
+login_argv="$WORK/login.argv"
+device_start='{"grantId":"agd_testgrant123456789012345","deviceSecret":"ags_testsecret123456789012345","verificationUrl":"https://sharenow.today/connect/agent?grant=agd_testgrant123456789012345","expiresIn":600,"interval":3}'
+device_token='{"status":"connected","apiKey":"snk_test_browser_private_key_1234567890"}'
+assert_run "browser login connects without printing the account key" 0 "were not printed" -- \
+  env HOME="$login_home" SHARENOW_NO_BROWSER_OPEN=1 STUB_CURL_LOG="$login_log" \
+    STUB_CURL_ARGV_LOG="$login_argv" STUB_CURL_DEVICE_START_STATUS=201 \
+    STUB_CURL_DEVICE_START_BODY="$device_start" STUB_CURL_DEVICE_TOKEN_STATUS=200 \
+    STUB_CURL_DEVICE_TOKEN_BODY="$device_token" \
+    /bin/bash "$SCRIPTS/account.sh" login --client claude-code
+assert_eq "browser login saves the returned key only in credentials" \
+  "snk_test_browser_private_key_1234567890" "$(tr -d '[:space:]' < "$login_home/.sharenow/credentials")"
+mode=$(stat -f '%Lp' "$login_home/.sharenow/credentials" 2>/dev/null || stat -c '%a' "$login_home/.sharenow/credentials")
+assert_eq "browser login credentials are mode 600" "600" "$mode"
+TESTS_RUN=$((TESTS_RUN + 1))
+if tr '\0' '\n' < "$login_argv" | grep -q 'snk_test_browser_private_key_1234567890'; then
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - account key appeared in a command argument"
+else
+  echo "ok $TESTS_RUN - account key never appears in a command argument"
+fi
+assert_eq "browser login calls start then token endpoints" \
+  $'POST\thttps://sharenow.today/api/auth/agent/device/start\nPOST\thttps://sharenow.today/api/auth/agent/device/token' \
+  "$(cat "$login_log")"
+
+publish_wd="$(new_workdir)"
+printf '%s' '<h1>one install</h1>' > "$publish_wd/index.html"
+assert_run "saved browser credential makes publishing permanent" 0 "publish_result.auth_mode=authenticated" -- \
+  env HOME="$login_home" STUB_CURL_BODY="$PUB_BODY" \
+    /bin/bash "$SCRIPTS/publish.sh" "$publish_wd/index.html"
+
+assert_run "publish rejects --api-key" 1 "unknown option: --api-key" -- \
+  env STUB_CURL_BODY="$PUB_BODY" \
+    /bin/bash "$SCRIPTS/publish.sh" "$publish_wd/index.html" --api-key test-key
+assert_run "publish rejects --base-url" 1 "unknown option: --base-url" -- \
+  env STUB_CURL_BODY="$PUB_BODY" \
+    /bin/bash "$SCRIPTS/publish.sh" "$publish_wd/index.html" --base-url https://example.invalid
+assert_run "Drive rejects token command arguments" 1 "unknown global option: --token" -- \
+  /bin/bash "$SCRIPTS/drive.sh" --token drv_live_test ls
 
 # ==========================================================================
 # Summary

@@ -5,7 +5,6 @@ BASE_URL="https://sharenow.today"
 CREDENTIALS_FILE="$HOME/.sharenow/credentials"
 API_KEY="${SHARENOW_API_KEY:-}"
 DRIVE_TOKEN="${SHARENOW_DRIVE_TOKEN:-}"
-ALLOW_NON_SHARENOW_BASE_URL=0
 MAX_FILE_BYTES=$((500 * 1024 * 1024))
 
 usage() {
@@ -13,10 +12,8 @@ usage() {
 Usage: drive.sh [global options] <command> [args]
 
 Global options:
-  --api-key <key>        Account API key (or $SHARENOW_API_KEY / ~/.sharenow/credentials)
-  --token <drv_live_...> Drive token (or $SHARENOW_DRIVE_TOKEN)
-  --base-url <url>       API base (default: https://sharenow.today)
-  --allow-nonsharenow-base-url
+  Credentials come from $SHARENOW_API_KEY, $SHARENOW_DRIVE_TOKEN, or
+  ~/.sharenow/credentials. Secrets are not accepted as command arguments.
 
 Commands:
   create [name] [--default]
@@ -37,6 +34,15 @@ USAGE
 }
 
 die() { echo "error: $1" >&2; exit 1; }
+
+valid_credential() {
+  local value="$1"
+  case "$value" in
+    snk_????????????????????*|drv_live_????????????????????*) ;;
+    *) return 1 ;;
+  esac
+  [[ "$value" != *[!A-Za-z0-9_-]* ]]
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -59,10 +65,6 @@ done
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --api-key) API_KEY="$2"; shift 2 ;;
-    --token) DRIVE_TOKEN="$2"; shift 2 ;;
-    --base-url) BASE_URL="$2"; shift 2 ;;
-    --allow-nonsharenow-base-url) ALLOW_NON_SHARENOW_BASE_URL=1; shift ;;
     --help|-h) usage ;;
     --*) die "unknown global option: $1" ;;
     *) break ;;
@@ -77,21 +79,18 @@ if [[ -z "$API_KEY" && -z "$DRIVE_TOKEN" && -f "$CREDENTIALS_FILE" ]]; then
   API_KEY=$(tr -d '[:space:]' < "$CREDENTIALS_FILE")
 fi
 
-BASE_URL="${BASE_URL%/}"
-if [[ "$BASE_URL" != "https://sharenow.today" && "$ALLOW_NON_SHARENOW_BASE_URL" -ne 1 ]]; then
-  if [[ -n "$API_KEY" || -n "$DRIVE_TOKEN" ]]; then
-    die "refusing to send credentials to non-default base URL; pass --allow-nonsharenow-base-url to override"
-  fi
-fi
-
-auth_header=()
 if [[ -n "$DRIVE_TOKEN" ]]; then
-  auth_header=(-H "authorization: Bearer $DRIVE_TOKEN")
+  AUTH_SECRET="$DRIVE_TOKEN"
 elif [[ -n "$API_KEY" ]]; then
-  auth_header=(-H "authorization: Bearer $API_KEY")
+  AUTH_SECRET="$API_KEY"
 else
   die "missing credentials; set SHARENOW_API_KEY, SHARENOW_DRIVE_TOKEN, or ~/.sharenow/credentials"
 fi
+valid_credential "$AUTH_SECRET" || die "invalid credential format"
+
+curl_drive() {
+  printf 'header = "authorization: Bearer %s"\n' "$AUTH_SECRET" | curl --config - "$@"
+}
 
 compute_sha256() {
   local f="$1"
@@ -128,9 +127,9 @@ api_json() {
   tmp=$(mktemp)
   local code
   if [[ -n "$body" ]]; then
-    code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" "${auth_header[@]}" -H "content-type: application/json" -d "$body")
+    code=$(curl_drive -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "content-type: application/json" -d "$body")
   else
-    code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" "${auth_header[@]}")
+    code=$(curl_drive -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url")
   fi
   http_handle_response "$code" "$tmp"
 }
@@ -247,7 +246,7 @@ case "$CMD" in
   cat)
     [[ $# -eq 2 ]] || die "usage: drive.sh cat <drive> <path>"
     id=$(resolve_drive "$1")
-    curl -fsS "$BASE_URL/api/v1/drives/$id/files/$(urlenc_path "$2")" "${auth_header[@]}"
+    curl_drive -fsS "$BASE_URL/api/v1/drives/$id/files/$(urlenc_path "$2")"
     ;;
   put)
     [[ $# -ge 2 ]] || die "usage: drive.sh put <drive> <path> --from <local-file>"
@@ -322,7 +321,7 @@ case "$CMD" in
           echo "download $p -> $out"
         else
           mkdir -p "$(dirname "$out")"
-          curl -fsS "$BASE_URL/api/v1/drives/$id/files/$(urlenc_path "$p")" "${auth_header[@]}" -o "$out"
+          curl_drive -fsS "$BASE_URL/api/v1/drives/$id/files/$(urlenc_path "$p")" -o "$out"
         fi
         total=$((total + 1))
       done < <(echo "$files" | "$JQ_BIN" -r '.files[].path')
@@ -349,7 +348,7 @@ case "$CMD" in
     else
       meta=$(file_meta "$id" "$path")
       etag=$(echo "$meta" | "$JQ_BIN" -r '.etag')
-      curl -fsS -X DELETE "$BASE_URL/api/v1/drives/$id/files/$(urlenc_path "$path")" "${auth_header[@]}" -H "If-Match: $etag" | "$JQ_BIN" .
+      curl_drive -fsS -X DELETE "$BASE_URL/api/v1/drives/$id/files/$(urlenc_path "$path")" -H "If-Match: $etag" | "$JQ_BIN" .
     fi
     ;;
   share)

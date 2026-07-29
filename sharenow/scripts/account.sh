@@ -9,16 +9,17 @@ set -euo pipefail
 BASE_URL="https://sharenow.today"
 CREDENTIALS_FILE="$HOME/.sharenow/credentials"
 API_KEY="${SHARENOW_API_KEY:-}"
-ALLOW_NON_SHARENOW_BASE_URL=0
 
 usage() {
   cat <<'USAGE'
 Usage: account.sh [global options] <command> [args]
 
 Global options:
-  --api-key <key>        Account API key (or $SHARENOW_API_KEY / ~/.sharenow/credentials)
-  --base-url <url>       API base (default: https://sharenow.today)
-  --allow-nonsharenow-base-url
+  --help                  Show this help
+
+Connection:
+  login [--client <name>] Connect in a first-party browser page. The key is
+                          saved locally and is never printed in chat.
 
 Sites:
   sites                                  List your Sites
@@ -64,7 +65,6 @@ Analytics:
 
 API keys:
   keys
-  keys create <name>          (the key is shown ONCE)
   keys revoke <id>
 
 Access (singular /publish/):
@@ -75,6 +75,107 @@ USAGE
 }
 
 die() { echo "error: $1" >&2; exit 1; }
+
+valid_account_key() {
+  local value="$1"
+  [[ "$value" == snk_????????????????????* ]] || return 1
+  [[ "$value" != *[!A-Za-z0-9_-]* ]]
+}
+
+json_field() {
+  local field="$1"
+  command -v node >/dev/null 2>&1 || die "login requires node"
+  node -e '
+    let body="";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => body += chunk);
+    process.stdin.on("end", () => {
+      try {
+        const value = JSON.parse(body)[process.argv[1]];
+        if (value !== undefined && value !== null) process.stdout.write(String(value));
+      } catch { process.exit(2); }
+    });
+  ' "$field"
+}
+
+device_post() {
+  local path="$1" body="$2" out code
+  out=$(mktemp)
+  code=$(printf '%s' "$body" | curl -sS -o "$out" -w "%{http_code}" -X POST \
+    "$BASE_URL$path" -H "content-type: application/json" --data-binary @-)
+  DEVICE_HTTP_CODE="$code"
+  DEVICE_HTTP_BODY=$(cat "$out")
+  rm -f "$out"
+}
+
+save_credentials() {
+  local key="$1" dir tmp
+  dir=$(dirname "$CREDENTIALS_FILE")
+  mkdir -p "$dir"
+  umask 077
+  tmp=$(mktemp "$dir/.credentials.XXXXXX") || die "could not create credentials file"
+  printf '%s\n' "$key" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CREDENTIALS_FILE"
+}
+
+login() {
+  local client="agent" normalized start_body grant_id device_secret verification_url interval
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --client) [[ $# -ge 2 ]] || die "--client requires a value"; client="$2"; shift 2 ;;
+      --help|-h) echo "Usage: account.sh login [--client <name>]"; return 0 ;;
+      *) die "unknown login option: $1" ;;
+    esac
+  done
+  normalized=$(printf '%s' "$client" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._ -' '-')
+  normalized="${normalized#-}"
+  normalized="${normalized%-}"
+  [[ -n "$normalized" ]] || normalized="agent"
+  start_body=$(printf '{"client":"%s"}' "$normalized")
+  device_post "/api/auth/agent/device/start" "$start_body"
+  [[ "$DEVICE_HTTP_CODE" -eq 201 ]] || die "could not start browser connection (HTTP $DEVICE_HTTP_CODE)"
+  grant_id=$(printf '%s' "$DEVICE_HTTP_BODY" | json_field grantId) || die "invalid connection response"
+  device_secret=$(printf '%s' "$DEVICE_HTTP_BODY" | json_field deviceSecret) || die "invalid connection response"
+  verification_url=$(printf '%s' "$DEVICE_HTTP_BODY" | json_field verificationUrl) || die "invalid connection response"
+  interval=$(printf '%s' "$DEVICE_HTTP_BODY" | json_field interval) || interval=3
+  [[ "$grant_id" == agd_* && "$device_secret" == ags_* && "$verification_url" == https://sharenow.today/connect/agent* ]] \
+    || die "invalid connection response"
+
+  echo "Open this secure sharenow page to connect:" >&2
+  echo "$verification_url" >&2
+  if [[ "${SHARENOW_NO_BROWSER_OPEN:-}" == "1" ]]; then
+    :
+  elif command -v open >/dev/null 2>&1; then
+    open "$verification_url" >/dev/null 2>&1 || true
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$verification_url" >/dev/null 2>&1 || true
+  fi
+
+  while true; do
+    device_post "/api/auth/agent/device/token" \
+      "$(printf '{\"grantId\":\"%s\",\"deviceSecret\":\"%s\"}' "$grant_id" "$device_secret")"
+    if [[ "$DEVICE_HTTP_CODE" -eq 202 ]]; then
+      sleep "$interval"
+      continue
+    fi
+    [[ "$DEVICE_HTTP_CODE" -eq 200 ]] || die "connection failed or expired (HTTP $DEVICE_HTTP_CODE)"
+    local api_key status
+    status=$(printf '%s' "$DEVICE_HTTP_BODY" | json_field status) || die "invalid token response"
+    api_key=$(printf '%s' "$DEVICE_HTTP_BODY" | json_field apiKey) || die "invalid token response"
+    [[ "$status" == "connected" ]] && valid_account_key "$api_key" || die "invalid token response"
+    save_credentials "$api_key"
+    unset api_key DEVICE_HTTP_BODY device_secret
+    echo "sharenow connected. Credentials were saved locally and were not printed." >&2
+    return 0
+  done
+}
+
+if [[ "${1:-}" == "login" ]]; then
+  shift
+  login "$@"
+  exit 0
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -93,9 +194,6 @@ command -v curl >/dev/null 2>&1 || die "requires curl"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --api-key) API_KEY="$2"; shift 2 ;;
-    --base-url) BASE_URL="$2"; shift 2 ;;
-    --allow-nonsharenow-base-url) ALLOW_NON_SHARENOW_BASE_URL=1; shift ;;
     --help|-h) usage ;;
     --*) die "unknown global option: $1" ;;
     *) break ;;
@@ -109,12 +207,12 @@ shift || true
 if [[ -z "$API_KEY" && -f "$CREDENTIALS_FILE" ]]; then
   API_KEY=$(tr -d '[:space:]' < "$CREDENTIALS_FILE")
 fi
-BASE_URL="${BASE_URL%/}"
-if [[ "$BASE_URL" != "https://sharenow.today" && "$ALLOW_NON_SHARENOW_BASE_URL" -ne 1 && -n "$API_KEY" ]]; then
-  die "refusing to send credentials to non-default base URL; pass --allow-nonsharenow-base-url to override"
-fi
 [[ -n "$API_KEY" ]] || die "missing credentials; set SHARENOW_API_KEY or ~/.sharenow/credentials"
-auth_header=(-H "authorization: Bearer $API_KEY")
+valid_account_key "$API_KEY" || die "invalid account credential format"
+
+curl_account() {
+  printf 'header = "authorization: Bearer %s"\n' "$API_KEY" | curl --config - "$@"
+}
 
 api_json() {
   local method="$1"; shift
@@ -124,9 +222,9 @@ api_json() {
   local tmp code
   tmp=$(mktemp)
   if [[ -n "$body" ]]; then
-    code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" "${auth_header[@]}" -H "content-type: application/json" "${extra[@]+"${extra[@]}"}" -d "$body")
+    code=$(curl_account -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "content-type: application/json" "${extra[@]+"${extra[@]}"}" -d "$body")
   else
-    code=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" "${auth_header[@]}" "${extra[@]+"${extra[@]}"}")
+    code=$(curl_account -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" "${extra[@]+"${extra[@]}"}")
   fi
   http_handle_response "$code" "$tmp"
 }
@@ -275,11 +373,6 @@ case "$CMD" in
     sub="${1:-}"; shift || true
     case "$sub" in
       ""|list) $req GET "$BASE_URL/api/v1/me/keys" | pp ;;
-      create)
-        name="${1:-}"; [[ -n "$name" ]] || die "keys create requires <name>"
-        out=$(api_json POST "$BASE_URL/api/v1/me/keys" "$(jobj --arg n "$name" '{name:$n}')")
-        echo "$out" | pp
-        echo "key_result.shown_once=true (store this key; it cannot be retrieved again)" >&2 ;;
       revoke) id="${1:-}"; [[ -n "$id" ]] || die "keys revoke requires <id>"; $req DELETE "$BASE_URL/api/v1/me/keys/$(urlenc "$id")" | pp ;;
       *) die "unknown keys subcommand: $sub" ;;
     esac ;;

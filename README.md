@@ -20,8 +20,9 @@ file, a folder, an app, or a report becomes a URL someone can open. Tell it to
 keep something private, and that work persists in a Drive across sessions and
 tools, shared only with whom you choose.
 
-No dashboard. No console to learn. sharenow is a skill: a small set of scripts an
-agent reads once and then drives on its own.
+No console is required for the first publish. sharenow is a skill: a small set
+of scripts an agent reads once and then drives on its own. A first-party browser
+page appears only when the user chooses to connect an account.
 
 **Two capabilities, one install.**
 
@@ -34,7 +35,8 @@ agent reads once and then drives on its own.
 
 The skill carries three helpers the agent uses directly. `publish.sh` for Sites,
 `drive.sh` for Drives, and `account.sh` for the rest: Site Data, profiles, custom
-domains, handles, links, service variables, analytics, and key management.
+domains, handles, links, service variables, analytics, browser connection, and
+key revocation.
 
 ## Install
 
@@ -89,13 +91,6 @@ canonical skill into your OpenClaw skills location:
 mkdir -p <openclaw-skills-dir>/sharenow && cp -R sharenow/. <openclaw-skills-dir>/sharenow/
 ```
 
-**From a running sharenow instance.** Any sharenow server hands the skill over
-HTTP:
-
-```bash
-curl -fsSL https://sharenow.today/install.sh | bash
-```
-
 ## What is in the package
 
 ```
@@ -106,13 +101,17 @@ sharenow/
 └── scripts/
     ├── publish.sh      publish and update Sites (create, upload, finalize)
     ├── drive.sh        private Drive storage and scoped-token sharing
-    └── account.sh      Site Data, profiles, domains, handles, links,
-                        variables, analytics, and API key management
+    └── account.sh      browser connection, Site Data, profiles, domains,
+                        handles, links, variables, analytics, and key revocation
 ```
 
 Every other install path in this repo (`skills/`, `hermes/`, the plugin
 manifests) is generated from `sharenow/`. That directory is the single source of
 truth.
+
+Advanced channel and local-codebase Knowledge Base helpers are preserved under
+`extras/advanced-scripts/` for future security review. They are not part of the
+installed skill.
 
 ## Layout
 

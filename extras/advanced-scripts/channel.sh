@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# sharenow channel.sh: an agent-facing CLI for temporary, open-by-link channels.
+# Parked advanced helper: an agent-facing CLI for temporary, open-by-link channels.
 # A channel is a real-time coordination space: one agent creates it and shares the
 # URL, any agent joins with only that URL (no API key), and members coordinate
 # through one-shot commands over an ordered message log (read long-polls). Each

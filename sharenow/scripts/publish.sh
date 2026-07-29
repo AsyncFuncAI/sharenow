@@ -8,7 +8,6 @@ API_KEY_SOURCE="none"
 if [[ -n "${SHARENOW_API_KEY:-}" ]]; then
   API_KEY_SOURCE="env"
 fi
-ALLOW_NON_SHARENOW_BASE_URL=0
 SLUG=""
 CLAIM_TOKEN=""
 TITLE=""
@@ -25,7 +24,6 @@ usage() {
 Usage: publish.sh <file-or-dir> [options]
 
 Options:
-  --api-key <key>         API key (or set $SHARENOW_API_KEY)
   --slug <slug>           Update existing publish
   --claim-token <token>   Claim token for anonymous updates
   --title <text>          Viewer title
@@ -35,14 +33,17 @@ Options:
   --spa                   Enable SPA routing
   --from-drive <drv_...>  Publish a Drive snapshot instead of local files
   --version <dv_...>      Drive version for --from-drive (default: current head)
-  --base-url <url>        API base (default: https://sharenow.today)
-  --allow-nonsharenow-base-url
-                         Allow auth requests to non-default API base URL
 USAGE
   exit 1
 }
 
 die() { echo "error: $1" >&2; exit 1; }
+
+valid_account_key() {
+  local value="$1"
+  [[ "$value" == snk_????????????????????* ]] || return 1
+  [[ "$value" != *[!A-Za-z0-9_-]* ]]
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -69,15 +70,12 @@ done
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --api-key)      API_KEY="$2"; API_KEY_SOURCE="flag"; shift 2 ;;
     --slug)         SLUG="$2"; shift 2 ;;
     --claim-token)  CLAIM_TOKEN="$2"; shift 2 ;;
     --title)        TITLE="$2"; shift 2 ;;
     --description)  DESCRIPTION="$2"; shift 2 ;;
     --ttl)          TTL="$2"; shift 2 ;;
     --client)       CLIENT="$2"; shift 2 ;;
-    --base-url)     BASE_URL="$2"; shift 2 ;;
-    --allow-nonsharenow-base-url) ALLOW_NON_SHARENOW_BASE_URL=1; shift ;;
     --spa)          SPA_MODE="true"; shift ;;
     --from-drive)   FROM_DRIVE="$2"; shift 2 ;;
     --version)      DRIVE_VERSION="$2"; shift 2 ;;
@@ -99,15 +97,20 @@ if [[ -z "$API_KEY" && -f "$CREDENTIALS_FILE" ]]; then
   API_KEY=$(tr -d '[:space:]' < "$CREDENTIALS_FILE")
   [[ -n "$API_KEY" ]] && API_KEY_SOURCE="credentials"
 fi
+if [[ -n "$API_KEY" ]]; then
+  valid_account_key "$API_KEY" || die "invalid account credential format"
+fi
 
-BASE_URL="${BASE_URL%/}"
+curl_publish() {
+  if [[ -n "$API_KEY" ]]; then
+    printf 'header = "authorization: Bearer %s"\n' "$API_KEY" | curl --config - "$@"
+  else
+    curl "$@"
+  fi
+}
+
 STATE_DIR=".sharenow"
 STATE_FILE="$STATE_DIR/state.json"
-
-# Safety guard: avoid accidentally sending bearer auth to arbitrary endpoints.
-if [[ -n "$API_KEY" && "$BASE_URL" != "https://sharenow.today" && "$ALLOW_NON_SHARENOW_BASE_URL" -ne 1 ]]; then
-  die "refusing to send API key to non-default base URL; pass --allow-nonsharenow-base-url to override"
-fi
 
 # Auto-load claim token from state file for slug updates (server uses it only for
 # anonymous sites; harmless when an API key is also present).
@@ -138,8 +141,7 @@ if [[ -n "$FROM_DRIVE" ]]; then
   fi
 
   echo "publishing from Drive..." >&2
-  RESPONSE=$(curl -sS -X POST "$BASE_URL/api/v1/publish/from-drive" \
-    -H "authorization: Bearer $API_KEY" \
+  RESPONSE=$(curl_publish -sS -X POST "$BASE_URL/api/v1/publish/from-drive" \
     -H "x-sharenow-client: $CLIENT_HEADER_VALUE" \
     -H "content-type: application/json" \
     -d "$BODY")
@@ -270,12 +272,6 @@ else
   METHOD="POST"
 fi
 
-# Build auth header
-AUTH_ARGS=()
-if [[ -n "$API_KEY" ]]; then
-  AUTH_ARGS=(-H "authorization: Bearer $API_KEY")
-fi
-
 AUTH_MODE="anonymous"
 if [[ -n "$API_KEY" ]]; then
   AUTH_MODE="authenticated"
@@ -294,8 +290,7 @@ CLIENT_ARGS=(-H "x-sharenow-client: $CLIENT_HEADER_VALUE")
 
 # Step 1: Create/update publish
 echo "creating publish ($file_count files)..." >&2
-RESPONSE=$(curl -sS -X "$METHOD" "$URL" \
-  "${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"}" \
+RESPONSE=$(curl_publish -sS -X "$METHOD" "$URL" \
   "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
   -H "content-type: application/json" \
   -d "$BODY")
@@ -358,8 +353,7 @@ done
 
 # Step 3: Finalize
 echo "finalizing..." >&2
-FIN_RESPONSE=$(curl -sS -X POST "$FINALIZE_URL" \
-  "${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"}" \
+FIN_RESPONSE=$(curl_publish -sS -X POST "$FINALIZE_URL" \
   "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
   -H "content-type: application/json" \
   -d "{\"versionId\":\"$VERSION_ID\"}")

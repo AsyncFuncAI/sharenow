@@ -17,6 +17,10 @@
 #   STUB_CURL_BODY_FILE  path to a file whose contents are the body (wins over BODY)
 #   STUB_CURL_LOG      if set, append one line per call: METHOD<TAB>URL  (for asserting requests)
 #   STUB_CURL_BODY_LOG if set, append one line per call: the -d/--data-binary body (for asserting payloads)
+#   STUB_CURL_ARGV_LOG if set, append every raw argument as a NUL-delimited field
+#                      (for asserting secrets and auth headers never leave the CLI)
+#   STUB_CURL_DEVICE_START_BODY / STUB_CURL_DEVICE_TOKEN_BODY override the body
+#                      for the browser connection endpoints.
 #
 # The upload PUT paths in publish.sh/drive.sh use `-o /dev/null -w "%{http_code}"`;
 # those are handled by form 1 (writing the body to /dev/null, printing the status),
@@ -29,6 +33,10 @@ if [[ -n "${STUB_CURL_BODY_FILE:-}" && -f "${STUB_CURL_BODY_FILE:-}" ]]; then
   body="$(cat "$STUB_CURL_BODY_FILE")"
 else
   body="${STUB_CURL_BODY:-{\}}"
+fi
+
+if [[ -n "${STUB_CURL_ARGV_LOG:-}" ]]; then
+  printf '%s\0' "$@" >> "$STUB_CURL_ARGV_LOG"
 fi
 
 # Parse just enough of the argv to know the output mode, the method, and the URL.
@@ -54,6 +62,17 @@ for arg in "$@"; do
     *) prev=""; continue ;;
   esac
 done
+
+case "$url" in
+  */api/auth/agent/device/start)
+    body="${STUB_CURL_DEVICE_START_BODY:-$body}"
+    status="${STUB_CURL_DEVICE_START_STATUS:-$status}"
+    ;;
+  */api/auth/agent/device/token)
+    body="${STUB_CURL_DEVICE_TOKEN_BODY:-$body}"
+    status="${STUB_CURL_DEVICE_TOKEN_STATUS:-$status}"
+    ;;
+esac
 # Aggregate short-flag clusters like -sS or -fsS that we did not special-case.
 for arg in "$@"; do
   case "$arg" in
