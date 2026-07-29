@@ -327,6 +327,9 @@ assert_eq "backoff at 5s -> 3 (cap)" "3" "$(pick_delay 5)"
 # Each gets an arg-parse error case and a stubbed happy-path call.
 # ==========================================================================
 echo "# --- smoke: publish.sh ---"
+# Help is a successful, read-only command. Agents often probe it during setup.
+assert_run "publish help succeeds" 0 "Usage: publish.sh" -- \
+  /bin/bash "$SCRIPTS/publish.sh" --help
 # No target and no --from-drive -> usage (exit 1).
 assert_run "publish no args -> usage" 1 "Usage: publish.sh" -- \
   /bin/bash "$SCRIPTS/publish.sh"
@@ -348,10 +351,37 @@ pub_anon_home="$(new_workdir)"
 assert_run "anonymous publish reports one-hour public lifetime" 0 "publish_result.persistence=expires_1h" -- \
   env HOME="$pub_anon_home" STUB_CURL_BODY="$PUB_BODY" \
     /bin/bash "$SCRIPTS/publish.sh" "$pub_wd/index.html"
+assert_run "anonymous publish explains the next permanent-site action" 0 "To keep it permanently" -- \
+  env HOME="$pub_anon_home" STUB_CURL_BODY="$PUB_BODY" \
+    /bin/bash "$SCRIPTS/publish.sh" "$pub_wd/index.html"
+
+# The helper itself enforces the trust boundary. Instructions alone are not
+# enough when an agent accidentally points it at a broad source directory.
+pub_secret_wd="$(new_workdir)"
+echo '<h1>site</h1>' > "$pub_secret_wd/index.html"
+echo 'TOKEN=do-not-upload' > "$pub_secret_wd/.env"
+assert_run "publish rejects a directory containing .env" 1 "refusing to publish sensitive-looking path: .env" -- \
+  env STUB_CURL_BODY="$PUB_BODY" /bin/bash "$SCRIPTS/publish.sh" "$pub_secret_wd"
+
+pub_state_wd="$(new_workdir)"
+mkdir -p "$pub_state_wd/.sharenow" "$pub_state_wd/.git" "$pub_state_wd/node_modules/example"
+echo '<h1>site</h1>' > "$pub_state_wd/index.html"
+echo '{"claimToken":"secret"}' > "$pub_state_wd/.sharenow/state.json"
+echo 'private git metadata' > "$pub_state_wd/.git/config"
+echo 'large dependency tree' > "$pub_state_wd/node_modules/example/index.js"
+assert_run "publish skips private state and dependencies without blocking a normal project" 0 "abc.sharenow.today" -- \
+  env STUB_CURL_BODY="$PUB_BODY" /bin/bash "$SCRIPTS/publish.sh" "$pub_state_wd"
+
+pub_key_wd="$(new_workdir)"
+echo 'not-a-real-private-key' > "$pub_key_wd/server.key"
+assert_run "publish rejects a private-key file target" 1 "refusing to publish sensitive-looking path: server.key" -- \
+  env STUB_CURL_BODY="$PUB_BODY" /bin/bash "$SCRIPTS/publish.sh" "$pub_key_wd/server.key"
 
 echo "# --- smoke: drive.sh ---"
+assert_run "drive help succeeds" 0 "Usage: drive.sh" -- \
+  /bin/bash "$SCRIPTS/drive.sh" --help
 # Missing credentials -> die (no api-key, no token, no creds file under fake HOME).
-assert_run "drive missing creds" 1 "missing credentials" -- \
+assert_run "drive missing creds points to browser login" 1 "account.sh login" -- \
   /bin/bash "$SCRIPTS/drive.sh" ls
 # Unknown global option -> die.
 assert_run "drive unknown option" 1 "unknown global option" -- \
@@ -362,8 +392,10 @@ assert_run "drive ls happy path" 0 "drv_1" -- \
     /bin/bash "$SCRIPTS/drive.sh" ls
 
 echo "# --- smoke: account.sh ---"
+assert_run "account help succeeds" 0 "Usage: account.sh" -- \
+  /bin/bash "$SCRIPTS/account.sh" --help
 # Missing credentials.
-assert_run "account missing creds" 1 "missing credentials" -- \
+assert_run "account missing creds points to browser login" 1 "account.sh login" -- \
   /bin/bash "$SCRIPTS/account.sh" sites
 # Unknown command -> handled by the case default (die) after auth; give it creds.
 assert_run "account unknown command" 1 "-" -- \
@@ -636,6 +668,16 @@ if grep -Fq 'fixed first-party API origin' "$REPO_ROOT/sharenow/SKILL.md" &&
 else
   TESTS_FAIL=$((TESTS_FAIL + 1))
   echo "not ok $TESTS_RUN - installed skill does not state its fixed network and execution boundary"
+fi
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -Fq 'Why security scanners may warn' "$REPO_ROOT/README.md" &&
+   grep -Fq 'exact files you approve' "$REPO_ROOT/README.md" &&
+   grep -Fq 'three shell helpers' "$REPO_ROOT/README.md"; then
+  echo "ok $TESTS_RUN - README explains the compact package trust boundary before setup"
+else
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - README is missing the scanner warning and exact upload scope"
 fi
 
 login_home="$(new_workdir)"

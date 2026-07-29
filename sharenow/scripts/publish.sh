@@ -20,6 +20,7 @@ FROM_DRIVE=""
 DRIVE_VERSION=""
 
 usage() {
+  local code="${1:-1}"
   cat <<'USAGE'
 Usage: publish.sh <file-or-dir> [options]
 
@@ -34,7 +35,7 @@ Options:
   --from-drive <drv_...>  Publish a Drive snapshot instead of local files
   --version <dv_...>      Drive version for --from-drive (default: current head)
 USAGE
-  exit 1
+  exit "$code"
 }
 
 die() { echo "error: $1" >&2; exit 1; }
@@ -54,7 +55,7 @@ if [[ -x "$BUNDLED_JQ" ]]; then
 elif command -v jq >/dev/null 2>&1; then
   JQ_BIN="$(command -v jq)"
 else
-  die "requires jq"
+  die "requires jq. Install it with 'brew install jq' (macOS) or 'sudo apt-get install jq' (Debian/Ubuntu), then retry"
 fi
 
 for cmd in curl file; do
@@ -79,7 +80,7 @@ while [[ $# -gt 0 ]]; do
     --spa)          SPA_MODE="true"; shift ;;
     --from-drive)   FROM_DRIVE="$2"; shift 2 ;;
     --version)      DRIVE_VERSION="$2"; shift 2 ;;
-    --help|-h)      usage ;;
+    --help|-h)      usage 0 ;;
     -*)             die "unknown option: $1" ;;
     *)              [[ -z "$TARGET" ]] && TARGET="$1" || die "unexpected argument: $1"; shift ;;
   esac
@@ -207,10 +208,22 @@ guess_content_type() {
   esac
 }
 
+refuse_sensitive_path() {
+  local rel="$1"
+  local name
+  name="$(basename "$rel")"
+  case "$name" in
+    .env|.env.*|id_rsa|id_dsa|id_ecdsa|id_ed25519|*.pem|*.key|*.p12|*.pfx)
+      die "refusing to publish sensitive-looking path: $rel. Choose a generated output folder without secrets or private keys"
+      ;;
+  esac
+}
+
 # Build file manifest as JSON array
 FILES_JSON="[]"
 
 if [[ -f "$TARGET" ]]; then
+  refuse_sensitive_path "$(basename "$TARGET")"
   sz=$(wc -c < "$TARGET" | tr -d ' ')
   ct=$(guess_content_type "$TARGET")
   bn=$(basename "$TARGET")
@@ -225,7 +238,7 @@ elif [[ -d "$TARGET" ]]; then
     rel="${f#$TARGET/}"
     [[ "$rel" == ".DS_Store" ]] && continue
     [[ "$(basename "$rel")" == ".DS_Store" ]] && continue
-    [[ "$rel" == ".sharenow/fork-meta.json" ]] && continue
+    refuse_sensitive_path "$rel"
     sz=$(wc -c < "$f" | tr -d ' ')
     ct=$(guess_content_type "$f")
     h=$(compute_sha256 "$f")
@@ -233,7 +246,7 @@ elif [[ -d "$TARGET" ]]; then
     FILES_JSON=$(echo "$FILES_JSON" | "$JQ_BIN" --arg p "$rel" --argjson s "$sz" --arg c "$ct" --arg h "$h" \
       '. + [{"path":$p,"size":$s,"contentType":$c,"hash":$h}]')
     FILE_MAP=$(echo "$FILE_MAP" | "$JQ_BIN" --arg p "$rel" --arg a "$abs" '. + {($p):$a}')
-  done < <(find "$TARGET" -type f -print0 | sort -z)
+  done < <(find "$TARGET" \( -type d \( -name .git -o -name .sharenow -o -name node_modules \) -prune \) -o -type f -print0 | sort -z)
 else
   die "not a file or directory: $TARGET"
 fi
@@ -319,7 +332,7 @@ else
 fi
 upload_errors=0
 
-for i in $(seq 0 $((UPLOAD_COUNT - 1))); do
+for ((i = 0; i < UPLOAD_COUNT; i++)); do
   upload_path=$(echo "$RESPONSE" | "$JQ_BIN" -r ".upload.uploads[$i].path")
   upload_url=$(echo "$RESPONSE" | "$JQ_BIN" -r ".upload.uploads[$i].url")
   upload_ct=$(echo "$RESPONSE" | "$JQ_BIN" -r ".upload.uploads[$i].headers[\"Content-Type\"] // empty")
@@ -424,4 +437,5 @@ else
   if [[ -n "$RESPONSE_CLAIM_TOKEN" ]]; then
     echo "claim token saved to $STATE_FILE" >&2
   fi
+  echo "To keep it permanently, open the private claim URL or run ./scripts/account.sh login --client ${CLIENT:-agent}, then publish again." >&2
 fi

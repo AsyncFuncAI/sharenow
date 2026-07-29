@@ -11,6 +11,7 @@ CREDENTIALS_FILE="$HOME/.sharenow/credentials"
 API_KEY="${SHARENOW_API_KEY:-}"
 
 usage() {
+  local code="${1:-1}"
   cat <<'USAGE'
 Usage: account.sh [global options] <command> [args]
 
@@ -71,7 +72,7 @@ Access (singular /publish/):
   access <slug>
   metadata set <slug> --json '<inline|@file>'
 USAGE
-  exit 1
+  exit "$code"
 }
 
 die() { echo "error: $1" >&2; exit 1; }
@@ -185,7 +186,7 @@ if [[ -x "$BUNDLED_JQ" ]]; then
 elif command -v jq >/dev/null 2>&1; then
   JQ_BIN="$(command -v jq)"
 else
-  die "requires jq"
+  die "requires jq. Install it with 'brew install jq' (macOS) or 'sudo apt-get install jq' (Debian/Ubuntu), then retry"
 fi
 command -v curl >/dev/null 2>&1 || die "requires curl"
 
@@ -194,7 +195,7 @@ command -v curl >/dev/null 2>&1 || die "requires curl"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --help|-h) usage ;;
+  --help|-h) usage 0 ;;
     --*) die "unknown global option: $1" ;;
     *) break ;;
   esac
@@ -207,7 +208,7 @@ shift || true
 if [[ -z "$API_KEY" && -f "$CREDENTIALS_FILE" ]]; then
   API_KEY=$(tr -d '[:space:]' < "$CREDENTIALS_FILE")
 fi
-[[ -n "$API_KEY" ]] || die "missing credentials; set SHARENOW_API_KEY or ~/.sharenow/credentials"
+[[ -n "$API_KEY" ]] || die "not connected. Run ./scripts/account.sh login --client <agent-name>, then retry"
 valid_account_key "$API_KEY" || die "invalid account credential format"
 
 curl_account() {

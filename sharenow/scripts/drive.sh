@@ -8,6 +8,7 @@ DRIVE_TOKEN="${SHARENOW_DRIVE_TOKEN:-}"
 MAX_FILE_BYTES=$((500 * 1024 * 1024))
 
 usage() {
+  local code="${1:-1}"
   cat <<'USAGE'
 Usage: drive.sh [global options] <command> [args]
 
@@ -30,7 +31,7 @@ Commands:
   revoke <drive> <tokenId>
   delete <drive> --confirm "<drive name>"
 USAGE
-  exit 1
+  exit "$code"
 }
 
 die() { echo "error: $1" >&2; exit 1; }
@@ -53,7 +54,7 @@ if [[ -x "$BUNDLED_JQ" ]]; then
 elif command -v jq >/dev/null 2>&1; then
   JQ_BIN="$(command -v jq)"
 else
-  die "requires jq"
+  die "requires jq. Install it with 'brew install jq' (macOS) or 'sudo apt-get install jq' (Debian/Ubuntu), then retry"
 fi
 
 for cmd in curl file; do
@@ -65,7 +66,7 @@ done
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --help|-h) usage ;;
+  --help|-h) usage 0 ;;
     --*) die "unknown global option: $1" ;;
     *) break ;;
   esac
@@ -84,7 +85,7 @@ if [[ -n "$DRIVE_TOKEN" ]]; then
 elif [[ -n "$API_KEY" ]]; then
   AUTH_SECRET="$API_KEY"
 else
-  die "missing credentials; set SHARENOW_API_KEY, SHARENOW_DRIVE_TOKEN, or ~/.sharenow/credentials"
+  die "not connected. Run ./scripts/account.sh login --client <agent-name>, then retry"
 fi
 valid_credential "$AUTH_SECRET" || die "invalid credential format"
 

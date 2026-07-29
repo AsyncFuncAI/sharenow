@@ -40,8 +40,27 @@ key revocation.
 
 ## Install
 
-One skill, the same three scripts, wherever your agent lives. Choose the line
-that fits; only the destination changes.
+### Why security scanners may warn
+
+Publishing skills can look powerful to automated scanners because their job is
+to read local files and upload them. This package contains only three shell helpers,
+all shown below. They send the exact files you approve to the fixed
+first-party origin `https://sharenow.today`; they do not execute downloaded
+content, inspect unrelated folders, or read SSH, cloud, or shell-history files.
+Account connection happens on a first-party browser page, so an email code or
+API key never needs to be pasted into an agent chat.
+
+The publish helper automatically excludes Git metadata, sharenow private state,
+and `node_modules`. It fails closed when a target contains `.env` or a common
+private-key file type.
+
+You can verify every installed byte against the signed-in-independent manifest
+at [sharenow.today/.well-known/sharenow-skill.json](https://sharenow.today/.well-known/sharenow-skill.json).
+The higher-blast-radius collaboration and codebase-upload experiments remain
+outside the installed package.
+
+One skill, the same three scripts, wherever your local agent runs. Re-run the
+same command later to update it in place.
 
 **Universal (recommended).** Anywhere the `skills` CLI runs:
 
@@ -51,45 +70,19 @@ npx skills add AsyncFuncAI/sharenow --skill sharenow -g
 
 Drop the `-g` for a project-local, repo-pinned install.
 
-**Codex.** Clone this repo into your project; Codex reads `.codex-plugin/plugin.json` on its own.
+The installer discovers Codex, Claude Code, Cursor, OpenCode, and other common
+local-agent skill folders. If your agent does not support local shell tools,
+such as a browser-only chat, ask it to use sharenow's public HTTP API instead.
+It can publish as long as it can call `curl` to an external service.
 
-```bash
-git clone https://github.com/AsyncFuncAI/sharenow
-```
+After setup, try one of these directly in your agent:
 
-**Cursor.** Clone this repo into your project; Cursor reads `.cursor-plugin/plugin.json` on its own.
+- `Publish this website to sharenow.`
+- `Turn this result into a simple page and publish it to sharenow.`
+- `Summarize this session as a shareable page and publish it to sharenow.`
 
-```bash
-git clone https://github.com/AsyncFuncAI/sharenow
-```
-
-**Claude Code.** Copy the canonical skill into your skills directory. The
-`sharenow/.` form copies the contents, so a re-run updates in place rather than
-nesting:
-
-```bash
-mkdir -p ~/.claude/skills/sharenow && cp -R sharenow/. ~/.claude/skills/sharenow/   # global
-# or, for one project:
-mkdir -p .claude/skills/sharenow && cp -R sharenow/. .claude/skills/sharenow/
-```
-
-**OpenCode.** OpenCode discovers `SKILL.md` skills from several roots. Copy the
-canonical skill into any of them (the `cp` creates the path on your machine):
-
-```bash
-mkdir -p .opencode/skills/sharenow && cp -R sharenow/. .opencode/skills/sharenow/
-# OpenCode also reads .claude/skills/ and .agents/skills/
-```
-
-**Hermes.** Use the Hermes layout shipped in this repo:
-`hermes/productivity/sharenow/`.
-
-**OpenClaw.** OpenClaw loads standard `SKILL.md` skill directories. Copy the
-canonical skill into your OpenClaw skills location:
-
-```bash
-mkdir -p <openclaw-skills-dir>/sharenow && cp -R sharenow/. <openclaw-skills-dir>/sharenow/
-```
+Manual agent-specific layouts are kept in this repository for maintainers and
+troubleshooting, but they are not a second install path for normal users.
 
 ## What is in the package
 
