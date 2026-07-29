@@ -621,6 +621,23 @@ else
   echo "ok $TESTS_RUN - installed skill has no agent-visible OTP, key argument, or alternate-host instructions"
 fi
 
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -REin 'channel\.sh|kb\.sh' "$REPO_ROOT/sharenow" >/dev/null 2>&1; then
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - installed skill refers to parked advanced helpers"
+else
+  echo "ok $TESTS_RUN - installed skill does not advertise parked advanced helpers"
+fi
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -Fq 'fixed first-party API origin' "$REPO_ROOT/sharenow/SKILL.md" &&
+   grep -Fq 'never execute downloaded or server-returned content' "$REPO_ROOT/sharenow/SKILL.md"; then
+  echo "ok $TESTS_RUN - installed skill states its fixed network and execution boundary"
+else
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - installed skill does not state its fixed network and execution boundary"
+fi
+
 login_home="$(new_workdir)"
 login_log="$WORK/login.requests"
 login_argv="$WORK/login.argv"

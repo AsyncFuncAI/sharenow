@@ -11,16 +11,12 @@
 # There are no repo-root-relative paths here by design.
 #
 # What it factors out: the identical "curl wrote the body to a temp file and told
-# me the status code; now surface a clean error or return the body" tail that was
-# duplicated across kb.sh (handle_api_response), account.sh/drive.sh (api_json),
-# and channel.sh (api_keyless/api_session). Each script keeps its own curl call
-# (headers/auth differ per script); only this response tail is shared.
+# me the status code; now surface a clean error or return the body" tail shared
+# by the installed API helpers. Each script keeps its own curl call because its
+# headers and authorization differ; only this response tail is shared.
 #
-# NOTE (deliberate fix): drive.sh's copy previously extracted only `.error`
-# (missing the `.message` fallback that account.sh and kb.sh already had). This
-# unified version always uses `.error // .message // empty`, so a server error
-# that reports `.message` now surfaces cleanly from drive.sh too, matching the
-# other scripts.
+# Always use `.error // .message // empty` so every helper surfaces either common
+# server error shape before falling back to the raw response body.
 
 # http_handle_response <http_status> <body_tmp_file>
 #   On a 2xx: print the body verbatim to stdout, remove the temp file, return 0.

@@ -11,7 +11,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.11.0**
+**Skill version: 1.11.1**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -31,6 +31,8 @@ npx skills add AsyncFuncAI/sharenow --skill sharenow
 ## Trust boundary
 
 - Run a helper only for the capability the user requested.
+- Helpers use the fixed first-party API origin `https://sharenow.today`. Upload
+  only the exact user-approved target; never execute downloaded or server-returned content.
 - Never publish `.` or a broad repository merely because it is the current
   directory. Publish the exact output path.
 - Before publishing a directory, confirm it is the intended generated output
