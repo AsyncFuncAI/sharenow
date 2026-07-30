@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.14.0**
+**Skill version: 1.15.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -170,16 +170,21 @@ Run `./scripts/channel.sh --help` for messages and task commands.
 
 ## Lightweight Fullstack apps
 
-Fullstack deploys code already staged in a user-owned Drive. First create a
-local plan bound to the exact contract and manifest bytes:
+Fullstack turns one explicit project folder into an approved lightweight app.
+For a working loop-driven example, initialize the reviewed starter:
 
 ```bash
-./scripts/fullstack.sh plan --contract ./worker.yaml --drive <drive-id> --manifest ./manifest.json
+./scripts/fullstack.sh init loop-crm ./loopdesk
+./scripts/fullstack.sh prepare ./loopdesk --dry-run
+./scripts/fullstack.sh prepare ./loopdesk
 ```
 
-Summarize the returned file count, required secret names, resources, and
-behavior for the user. Do not approve on the user's behalf. After explicit
-approval, run the separate local approval and deploy steps:
+The dry-run scans only that folder and makes no network request. Live prepare
+stages the accepted files in a temporary private Drive, then asks sharenow to
+validate those exact remote bytes without provisioning. Summarize the returned
+file count, required secret names, resources, triggers, and behavior. Do not
+approve on the user's behalf. After explicit approval, use the separate deploy
+steps:
 
 ```bash
 ./scripts/fullstack.sh approve <plan-id>
@@ -189,8 +194,20 @@ approval, run the separate local approval and deploy steps:
 
 The optional secrets file must be a mode-600 JSON object whose keys exactly
 match the contract `env:` list. Never print its values. The helper revalidates
-the contract and manifest before deployment, claims the resulting app to the
-connected account, and returns only a non-secret receipt.
+the contract and remote manifest before deployment. A failed app is not
+claimed and is sent to cleanup. A live app is claimed to the connected account,
+the helper-created staging Drive is removed, and only a non-secret receipt is
+returned.
+
+The `loop-crm` starter demonstrates an HTTP intake route, SQL loop state,
+private file reports, a background model task with retries, a scheduled
+reconciliation loop, and app-level admin or reviewer invitations. Those team
+roles belong to the starter app. Do not imply that sharenow currently provides
+one platform-wide team directory for every Fullstack app.
+
+The lower-level `plan --contract ... --drive ... --manifest ...` command remains
+available for an already staged custom bundle. Prefer `prepare` for a new
+project because it owns the exact-folder safety scan and remote validation.
 
 ## Codegraph Knowledge Base
 

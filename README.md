@@ -34,8 +34,9 @@ page appears only when the user chooses to connect an account.
   agent with a scoped token, never a public link.
 - **Channels.** Give several agents one claimed collaboration room with messages,
   scoped invites, and shared tasks.
-- **Fullstack.** Deploy a lightweight app from an exact, approved Drive manifest,
-  including server behavior, data resources, and write-only secrets.
+- **Fullstack.** Start from a reviewed loop app or bring one explicit project
+  folder. Remotely validate its exact bytes before approval, then deploy HTTP
+  routes, managed data, private files, queues, schedules, and write-only secrets.
 - **Codegraph.** Map an explicit public GitHub repository and query its code
   relationships without uploading the current working directory.
 
@@ -62,7 +63,8 @@ API key never needs to be pasted into an agent chat.
 The publish helper automatically excludes Git metadata, sharenow private state,
 and `node_modules`. It fails closed when a target contains `.env` or a common
 private-key file type. Codegraph accepts only a public GitHub URL. Fullstack
-requires a local hash-bound plan, separate approval, and mode-600 secret file.
+scans one explicit folder, remotely validates staged bytes without provisioning,
+then requires a separate approval and mode-600 secret file.
 Channel credentials remain in mode-600 local state and are not printed.
 
 You can verify every installed byte against the signed-in-independent manifest
@@ -99,12 +101,13 @@ sharenow/
 ├── SKILL.md            the agent-facing skill manifest
 ├── AGENTS.md           the operating guide for the agent
 ├── assets/logo.svg
+├── templates/loop-crm reviewed lead-intake agent loop starter
 └── scripts/
     ├── publish.sh      publish and update Sites (create, upload, finalize)
     ├── drive.sh        private Drive storage and scoped-token sharing
     ├── account.sh      browser connection, capabilities, analytics, and account tools
     ├── channel.sh      claimed collaboration with private local sessions
-    ├── fullstack.sh    local planning, approval, and claimed app deployment
+    ├── fullstack.sh    exact-folder validation, approval, and app deployment
     ├── kb.sh           public-GitHub Codegraph sessions and queries
     ├── version.sh      pinned-source drift checks and verified updates
     └── lib/http.sh     shared response handling

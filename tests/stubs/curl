@@ -80,6 +80,22 @@ case "$url" in
     body="${STUB_CURL_CHANNEL_CLAIM_BODY:-$body}"
     status="${STUB_CURL_CHANNEL_CLAIM_STATUS:-$status}"
     ;;
+  */api/v1/drives)
+    body="${STUB_CURL_DRIVE_CREATE_BODY:-$body}"
+    status="${STUB_CURL_DRIVE_CREATE_STATUS:-$status}"
+    ;;
+  */api/v1/drives/*/files/uploads)
+    body="${STUB_CURL_DRIVE_UPLOAD_BODY:-$body}"
+    status="${STUB_CURL_DRIVE_UPLOAD_STATUS:-$status}"
+    ;;
+  */api/v1/drives/*/files/finalize)
+    body="${STUB_CURL_DRIVE_FINALIZE_BODY:-$body}"
+    status="${STUB_CURL_DRIVE_FINALIZE_STATUS:-$status}"
+    ;;
+  */api/v1/fullstack/validate)
+    body="${STUB_CURL_FULLSTACK_VALIDATE_BODY:-$body}"
+    status="${STUB_CURL_FULLSTACK_VALIDATE_STATUS:-$status}"
+    ;;
   */api/v1/fullstack)
     body="${STUB_CURL_FULLSTACK_CREATE_BODY:-$body}"
     status="${STUB_CURL_FULLSTACK_CREATE_STATUS:-$status}"
@@ -98,6 +114,10 @@ case "$url" in
       tail -n +2 "$STUB_CURL_FULLSTACK_URL_STATUS_FILE" > "$STUB_CURL_FULLSTACK_URL_STATUS_FILE.next"
       mv "$STUB_CURL_FULLSTACK_URL_STATUS_FILE.next" "$STUB_CURL_FULLSTACK_URL_STATUS_FILE"
     fi
+    ;;
+  https://upload.test/*)
+    body="${STUB_CURL_UPLOAD_BODY:-{}}"
+    status="${STUB_CURL_UPLOAD_STATUS:-200}"
     ;;
 esac
 

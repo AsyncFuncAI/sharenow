@@ -640,7 +640,11 @@ expected_installed_files="$(printf '%s\n' \
   './scripts/kb.sh' \
   './scripts/lib/http.sh' \
   './scripts/publish.sh' \
-  './scripts/version.sh')"
+  './scripts/version.sh' \
+  './templates/loop-crm/README.md' \
+  './templates/loop-crm/fullstack.yaml' \
+  './templates/loop-crm/schema.sql' \
+  './templates/loop-crm/worker.js')"
 assert_eq "one install contains the seven reviewed capability helpers" \
   "$expected_installed_files" "$installed_files"
 assert_eq "reviewed Channel helper is installed" "yes" \
@@ -820,12 +824,71 @@ assert_run "account capability discovery is available to the installed agent" 0 
 
 version_home="$(new_workdir)"
 mkdir -p "$version_home/.sharenow"
-manifest='{"name":"sharenow","source":"AsyncFuncAI/sharenow","version":"1.15.0","latestVersion":"1.15.0","minimumVersion":"1.15.0","files":[{"path":"SKILL.md","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
+manifest='{"name":"sharenow","source":"AsyncFuncAI/sharenow","version":"1.16.0","latestVersion":"1.16.0","minimumVersion":"1.16.0","files":[{"path":"SKILL.md","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
 assert_run "version status reports structured drift state" 0 '"state": "update_required"' -- \
   env HOME="$version_home" STUB_CURL_BODY="$manifest" \
     /bin/bash "$VERSION_SCRIPT" status --force
 
 fullstack_wd="$(new_workdir)"
+
+loop_parent="$(new_workdir)"
+assert_run "Fullstack initializes the reviewed loop CRM starter" 0 '"template": "loop-crm"' -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" init loop-crm "$loop_parent/loopdesk"
+assert_eq "loop CRM starter includes its contract" "yes" \
+  "$([[ -f "$loop_parent/loopdesk/fullstack.yaml" ]] && echo yes || echo no)"
+assert_eq "loop CRM starter includes its Worker" "yes" \
+  "$([[ -f "$loop_parent/loopdesk/worker.js" ]] && echo yes || echo no)"
+assert_run "Fullstack init refuses a non-empty destination" 1 "destination must be empty" -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" init loop-crm "$loop_parent/loopdesk"
+
+: > "$WORK/fullstack-prepare-dry-requests"
+prepare_dry_out="$(env HOME="$all_access_home" STUB_CURL_LOG="$WORK/fullstack-prepare-dry-requests" \
+  /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" prepare "$loop_parent/loopdesk" --dry-run)"
+assert_eq "Fullstack prepare dry-run scans the exact project without HTTP" "0" \
+  "$(wc -l < "$WORK/fullstack-prepare-dry-requests" | tr -d '[:space:]')"
+assert_eq "Fullstack prepare dry-run identifies the contract" "fullstack.yaml" \
+  "$(printf '%s' "$prepare_dry_out" | jq -r '.contract')"
+assert_eq "Fullstack prepare dry-run includes scheduled triggers" "schedule" \
+  "$(printf '%s' "$prepare_dry_out" | jq -r '.triggers[0].type')"
+
+unsafe_project="$(new_workdir)"
+printf '%s\n' 'bindings: []' > "$unsafe_project/fullstack.yaml"
+printf '%s\n' 'secret=value' > "$unsafe_project/.env"
+assert_run "Fullstack prepare refuses sensitive project files" 1 "sensitive file" -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" prepare "$unsafe_project" --dry-run
+
+: > "$WORK/fullstack-prepare-live-requests"
+prepare_live_out="$(env HOME="$all_access_home" STUB_CURL_LOG="$WORK/fullstack-prepare-live-requests" \
+  STUB_CURL_DRIVE_CREATE_BODY='{"drive":{"id":"drv_loopkit123"}}' \
+  STUB_CURL_DRIVE_UPLOAD_BODY='{"uploadUrl":"https://upload.test/file","uploadId":"upl_loop123"}' \
+  STUB_CURL_DRIVE_FINALIZE_BODY='{"file":{"status":"live"}}' \
+  STUB_CURL_FULLSTACK_VALIDATE_BODY='{"valid":true,"files":4,"bytes":4096,"resources":["worker","d1","r2","queue"],"requiredSecrets":["ANTHROPIC_API_KEY","APP_ADMIN_TOKEN"],"triggers":[{"name":"reconcile-leads","type":"schedule","cron":"*/15 * * * *"}]}' \
+  /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" prepare "$loop_parent/loopdesk")"
+prepared_plan_id="$(printf '%s' "$prepare_live_out" | jq -r '.planId')"
+assert_eq "Fullstack live prepare returns a remotely validated plan" "validated" \
+  "$(printf '%s' "$prepare_live_out" | jq -r '.state')"
+assert_eq "Fullstack live prepare creates one private Drive" "1" \
+  "$(grep -c $'POST\thttps://sharenow.today/api/v1/drives$' "$WORK/fullstack-prepare-live-requests" | tr -d '[:space:]')"
+assert_eq "Fullstack live prepare calls the non-provisioning validator" "1" \
+  "$(grep -c $'POST\thttps://sharenow.today/api/v1/fullstack/validate' "$WORK/fullstack-prepare-live-requests" | tr -d '[:space:]')"
+assert_run "Fullstack can revalidate an existing content-bound plan" 0 '"state": "validated"' -- \
+  env HOME="$all_access_home" STUB_CURL_FULLSTACK_VALIDATE_BODY='{"valid":true,"files":4,"bytes":4096,"resources":["worker","d1","r2","queue"],"requiredSecrets":["ANTHROPIC_API_KEY","APP_ADMIN_TOKEN"],"triggers":[]}' \
+    /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" validate "$prepared_plan_id"
+assert_run "Fullstack approval remains separate after remote validation" 0 '"approved": true' -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" approve "$prepared_plan_id"
+printf '%s\n' '{"ANTHROPIC_API_KEY":"sk-ant-test-loop","ANTHROPIC_MODEL":"claude-test","APP_ADMIN_TOKEN":"admin-test-loop"}' > "$loop_parent/loop-secrets.json"
+chmod 600 "$loop_parent/loop-secrets.json"
+: > "$WORK/fullstack-project-deploy-requests"
+project_deploy_out="$(env HOME="$all_access_home" STUB_CURL_LOG="$WORK/fullstack-project-deploy-requests" \
+  STUB_CURL_FULLSTACK_VALIDATE_BODY='{"valid":true,"files":4,"bytes":4096,"resources":["worker","d1","r2","queue"],"requiredSecrets":["ANTHROPIC_API_KEY","ANTHROPIC_MODEL","APP_ADMIN_TOKEN"],"triggers":[{"name":"reconcile-leads","type":"schedule","cron":"*/15 * * * *"}]}' \
+  STUB_CURL_FULLSTACK_CREATE_BODY='{"appId":"fsa_loopkit123","claimToken":"clm_loopkit_private"}' \
+  STUB_CURL_FULLSTACK_STATUS_BODY='{"state":"live","url":"https://loopkit123.sharenow.today"}' \
+  /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" deploy "$prepared_plan_id" --secrets-from "$loop_parent/loop-secrets.json")"
+assert_eq "Fullstack project deploy removes its helper-created staging Drive" "1" \
+  "$(grep -c $'DELETE\thttps://sharenow.today/api/v1/drives/drv_loopkit123' "$WORK/fullstack-project-deploy-requests" | tr -d '[:space:]')"
+assert_eq "Fullstack project deploy reports staging cleanup" "removed" \
+  "$(printf '%s' "$project_deploy_out" | jq -r '.stagingDrive')"
+
 cat > "$fullstack_wd/worker.yaml" <<'YAML'
 name: launch-api
 main: src/index.ts
@@ -875,6 +938,7 @@ printf '%s\n' 404 200 > "$WORK/fullstack-url-statuses"
 fullstack_out="$(env HOME="$all_access_home" STUB_CURL_ARGV_LOG="$WORK/fullstack-argv.log" \
   STUB_CURL_LOG="$WORK/fullstack-url-requests" \
   STUB_CURL_FULLSTACK_URL_STATUS_FILE="$WORK/fullstack-url-statuses" \
+  STUB_CURL_FULLSTACK_VALIDATE_BODY='{"valid":true,"files":1,"bytes":1200,"resources":["worker"],"requiredSecrets":["ANTHROPIC_API_KEY","STRIPE_SECRET_KEY"],"triggers":[]}' \
   STUB_CURL_FULLSTACK_CREATE_BODY='{"appId":"fsa_launch123","claimToken":"clm_fullstack_private"}' \
   STUB_CURL_FULLSTACK_STATUS_BODY='{"state":"live","url":"https://launch123.sharenow.today"}' \
   STUB_CURL_FULLSTACK_CLAIM_BODY='{"success":true}' \
@@ -889,6 +953,18 @@ assert_eq "Fullstack prints the branded URL after readiness" "https://launch123.
   "$(printf '%s' "$fullstack_out" | jq -r '.url')"
 assert_eq "Fullstack secrets never appear in process arguments" "no" \
   "$(tr '\0' '\n' < "$WORK/fullstack-argv.log" | grep -Eq 'sk_test_example|sk-ant-test-example' && echo yes || echo no)"
+
+: > "$WORK/fullstack-failed-requests"
+assert_run "failed Fullstack provisioning is cleaned up without being claimed" 1 "provisioning failed" -- \
+  env HOME="$all_access_home" STUB_CURL_LOG="$WORK/fullstack-failed-requests" \
+    STUB_CURL_FULLSTACK_VALIDATE_BODY='{"valid":true,"files":1,"bytes":1200,"resources":["worker"],"requiredSecrets":["ANTHROPIC_API_KEY","STRIPE_SECRET_KEY"],"triggers":[]}' \
+    STUB_CURL_FULLSTACK_CREATE_BODY='{"appId":"fsa_failed123","claimToken":"clm_failed_private"}' \
+    STUB_CURL_FULLSTACK_STATUS_BODY='{"state":"failed","failureCode":"provision_schedule"}' \
+    /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" deploy "$plan_id" --secrets-from "$fullstack_wd/secrets.json"
+assert_eq "failed Fullstack provisioning deletes the disposable app" "1" \
+  "$(grep -c $'DELETE\thttps://sharenow.today/api/v1/fullstack/fsa_failed123' "$WORK/fullstack-failed-requests" | tr -d '[:space:]')"
+assert_eq "failed Fullstack provisioning never claims the app" "0" \
+  "$(grep -c $'POST\thttps://sharenow.today/api/v1/fullstack/fsa_failed123/claim' "$WORK/fullstack-failed-requests" | tr -d '[:space:]' || true)"
 
 rollback_home="$(new_workdir)"
 mkdir -p "$rollback_home/.agents/skills/sharenow/scripts"
@@ -905,12 +981,12 @@ update_home="$(new_workdir)"
 mkdir -p "$update_home/.agents/skills/sharenow"
 printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$update_home/.agents/skills/sharenow/SKILL.md"
 skill_sha=$(shasum -a 256 "$REPO_ROOT/sharenow/SKILL.md" | awk '{print $1}')
-success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.14.0",latestVersion:"1.14.0",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
+success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.15.0",latestVersion:"1.15.0",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
 assert_run "verified skill update replaces the canonical install in place" 0 '"state": "current"' -- \
   env HOME="$update_home" STUB_CURL_BODY="$success_manifest" SHARENOW_NPX_BIN="$STUBS/npx" SHARENOW_NPX_SOURCE="$REPO_ROOT/sharenow" \
     /bin/bash "$VERSION_SCRIPT" update --yes
-assert_eq "verified update installs version 1.14.0" "yes" \
-  "$(grep -q 'Skill version: 1.14.0' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
+assert_eq "verified update installs version 1.15.0" "yes" \
+  "$(grep -q 'Skill version: 1.15.0' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
 # ==========================================================================
 # Summary

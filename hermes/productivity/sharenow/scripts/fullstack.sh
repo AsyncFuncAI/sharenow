@@ -14,16 +14,20 @@ Usage: fullstack.sh <command> [args]
 
 Commands:
   list
+  init loop-crm <empty-folder>
+  prepare <project-folder> [--dry-run]
   plan --contract <yaml-file> --drive <drive-id> --manifest <json-file>
+  validate <plan-id>
   approve <plan-id>
   deploy <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
   status <app-id>
   delete <app-id> --confirm <app-id> [--dry-run]
 
-Planning is local and makes no network request. A plan is bound to the exact
-contract and manifest bytes. Deploy requires a separate approve command and
-revalidates both files. Secret values are accepted only from a mode-600 JSON
-file, never from command-line values, and are never printed.
+Prepare scans one explicit project folder. Its dry-run is local. The live path
+stages accepted files in one private Drive and validates the exact remote bytes
+without provisioning. Deploy requires a separate approve command and repeats
+remote validation. Secret values are accepted only from a mode-600 JSON file,
+never from command-line values, and are never printed.
 USAGE
   exit "$code"
 }
@@ -38,6 +42,7 @@ elif command -v jq >/dev/null 2>&1; then JQ_BIN="$(command -v jq)"
 else die "requires jq. Install it with 'brew install jq' (macOS) or 'sudo apt-get install jq' (Debian/Ubuntu), then retry"; fi
 command -v curl >/dev/null 2>&1 || die "requires curl"
 command -v shasum >/dev/null 2>&1 || die "requires shasum"
+command -v file >/dev/null 2>&1 || die "requires file"
 . "$SCRIPT_DIR/lib/http.sh"
 
 valid_account_key() { [[ "$1" == snk_????????????????????* && "$1" != *[!A-Za-z0-9_-]* ]]; }
@@ -68,6 +73,12 @@ absolute_file() {
   dir=$(cd "$(dirname "$input")" && pwd)
   base=$(basename "$input")
   printf '%s/%s\n' "$dir" "$base"
+}
+
+absolute_dir() {
+  local input="$1"
+  [[ -d "$input" ]] || die "folder not found: $input"
+  (cd "$input" && pwd)
 }
 
 file_sha() { shasum -a 256 "$1" | awk '{print $1}'; }
@@ -157,13 +168,109 @@ declared_env() {
   ' "$1" | "$JQ_BIN" -Rsc 'split("\n") | map(select(length > 0)) | unique | sort'
 }
 
+declared_triggers() {
+  awk '
+    /^triggers:[[:space:]]*$/ { in_triggers=1; next }
+    in_triggers && /^[^[:space:]]/ { in_triggers=0 }
+    in_triggers && /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
+      if (name != "") print name "\t" type "\t" cron
+      line=$0; sub(/^.*name:[[:space:]]*/, "", line); gsub(/"/, "", line)
+      name=line; type=""; cron=""; next
+    }
+    in_triggers && /^[[:space:]]*type:[[:space:]]*/ {
+      line=$0; sub(/^.*type:[[:space:]]*/, "", line); gsub(/"/, "", line); type=line; next
+    }
+    in_triggers && /^[[:space:]]*cron:[[:space:]]*/ {
+      line=$0; sub(/^.*cron:[[:space:]]*/, "", line); gsub(/^"|"$/, "", line); cron=line; next
+    }
+    END { if (name != "") print name "\t" type "\t" cron }
+  ' "$1" | "$JQ_BIN" -Rsc '
+    split("\n") | map(select(length > 0) | split("\t") | {name:.[0],type:.[1],cron:.[2]})
+  '
+}
+
+is_sensitive_path() {
+  local path="$1" base lower
+  base="${path##*/}"
+  lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    .env|.env.*|*.pem|*.key|*.p12|*.pfx|*.jks|id_rsa|id_ed25519|credentials|credentials.json|service-account*.json|.npmrc|.netrc|.pypirc)
+      return 0 ;;
+  esac
+  case "$path" in
+    .sharenow/*|*/.sharenow/*|.aws/*|*/.aws/*|.ssh/*|*/.ssh/*) return 0 ;;
+  esac
+  return 1
+}
+
+project_manifest() {
+  local root="$1" manifest='[]' count=0 total=0 file_path rel size sha
+  if find "$root" -type l -print -quit | grep -q .; then
+    die "project contains a symbolic link; copy the intended file into the folder instead"
+  fi
+  while IFS= read -r -d '' file_path; do
+    rel="${file_path#"$root"/}"
+    case "$rel" in .git/*|node_modules/*|.DS_Store|*/.DS_Store) continue ;; esac
+    [[ "$rel" != *$'\n'* && "$rel" != /* && "$rel" != *../* && "$rel" != ../* ]] || die "unsafe project path: $rel"
+    is_sensitive_path "$rel" && die "sensitive file refused: $rel"
+    size=$(wc -c < "$file_path" | tr -d '[:space:]')
+    [[ "$size" -le 2097152 ]] || die "project file exceeds 2 MiB: $rel"
+    count=$((count + 1)); total=$((total + size))
+    [[ "$count" -le 200 ]] || die "project exceeds 200 files"
+    [[ "$total" -le 10485760 ]] || die "project exceeds 10 MiB"
+    sha=$(file_sha "$file_path")
+    manifest=$(printf '%s' "$manifest" | "$JQ_BIN" -c --arg path "$rel" --arg sha "$sha" --argjson size "$size" '. + [{path:$path,sha256:$sha,size:$size}]')
+  done < <(find "$root" -type f -print0 | sort -z)
+  [[ "$count" -gt 0 ]] || die "project folder contains no accepted files"
+  printf '%s' "$manifest" | "$JQ_BIN" -c 'sort_by(.path)'
+}
+
+stage_project_file() {
+  local drive_id="$1" root="$2" entry="$3" rel size sha content_type metadata started upload_url upload_id code
+  rel=$(printf '%s' "$entry" | "$JQ_BIN" -r '.path')
+  size=$(printf '%s' "$entry" | "$JQ_BIN" -r '.size')
+  sha=$(printf '%s' "$entry" | "$JQ_BIN" -r '.sha256')
+  content_type=$(file --brief --mime-type "$root/$rel" 2>/dev/null || printf '%s' application/octet-stream)
+  metadata=$("$JQ_BIN" -n --arg path "$rel" --argjson size "$size" --arg type "$content_type" --arg sha "$sha" \
+    '{path:$path,size:$size,contentType:$type,sha256:$sha,ifNoneMatch:"*"}')
+  started=$(api_account POST "$BASE_URL/api/v1/drives/$drive_id/files/uploads" "$metadata")
+  upload_url=$(printf '%s' "$started" | "$JQ_BIN" -r '.uploadUrl // empty')
+  upload_id=$(printf '%s' "$started" | "$JQ_BIN" -r '.uploadId // empty')
+  [[ "$upload_url" == https://* && -n "$upload_id" ]] || die "invalid Drive upload response"
+  code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT "$upload_url" -H "content-type: $content_type" --data-binary "@$root/$rel")
+  [[ "$code" -ge 200 && "$code" -lt 300 ]] || die "Drive upload failed for $rel (HTTP $code)"
+  api_account POST "$BASE_URL/api/v1/drives/$drive_id/files/finalize" "$("$JQ_BIN" -n --arg uploadId "$upload_id" '{uploadId:$uploadId}')" >/dev/null
+}
+
+remote_validate() {
+  local receipt="$1" env_json="${2:-}" contract_path yaml body result
+  [[ -n "$env_json" ]] || env_json='{}'
+  contract_path=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.contractPath')
+  yaml=$(cat "$contract_path")
+  body=$("$JQ_BIN" -n --arg yaml "$yaml" \
+    --arg driveId "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')" \
+    --argjson manifest "$(printf '%s' "$receipt" | "$JQ_BIN" -c '.manifest')" \
+    --argjson env "$env_json" '{yaml:$yaml,driveId:$driveId,manifest:$manifest,env:$env}')
+  result=$(api_account POST "$BASE_URL/api/v1/fullstack/validate" "$body")
+  unset body yaml
+  [[ "$(printf '%s' "$result" | "$JQ_BIN" -r '.valid // false')" == true ]] || die "remote Fullstack validation did not return a valid receipt"
+  printf '%s' "$result"
+}
+
 verify_receipt_content() {
-  local receipt="$1" contract manifest contract_sha manifest_sha normalized
+  local receipt="$1" contract manifest contract_sha manifest_sha normalized source_type project_root
   contract=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.contractPath')
-  manifest=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.manifestPath')
-  [[ -f "$contract" && -f "$manifest" ]] || die "planned contract or manifest no longer exists; create a new plan"
+  source_type=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')
+  if [[ "$source_type" == project ]]; then
+    project_root=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.projectRoot')
+    [[ -f "$contract" && -d "$project_root" ]] || die "planned project no longer exists; create a new plan"
+    normalized=$(project_manifest "$project_root")
+  else
+    manifest=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.manifestPath')
+    [[ -f "$contract" && -f "$manifest" ]] || die "planned contract or manifest no longer exists; create a new plan"
+    normalized=$(normalize_manifest "$manifest")
+  fi
   contract_sha=$(file_sha "$contract")
-  normalized=$(normalize_manifest "$manifest")
   manifest_sha=$(printf '%s' "$normalized" | text_sha)
   [[ "$contract_sha" == "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.contractSha256')" ]] || die "contract changed after approval; create and approve a new plan"
   [[ "$manifest_sha" == "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.manifestSha256')" ]] || die "manifest changed after approval; create and approve a new plan"
@@ -180,6 +287,62 @@ case "$CMD" in --help|-h) usage 0 ;; "") usage ;; esac
 shift
 
 case "$CMD" in
+  init)
+    [[ $# -eq 2 ]] || die "usage: fullstack.sh init loop-crm <empty-folder>"
+    [[ "$1" == loop-crm ]] || die "unknown Fullstack starter: $1"
+    destination="$2"
+    if [[ -e "$destination" ]]; then
+      [[ -d "$destination" && -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]] || die "destination must be empty"
+    else
+      mkdir -p "$destination"
+    fi
+    template_dir="$SKILL_DIR/templates/loop-crm"
+    [[ -d "$template_dir" ]] || die "loop-crm starter is missing from this skill installation"
+    cp -Rp "$template_dir/." "$destination/"
+    destination=$(absolute_dir "$destination")
+    "$JQ_BIN" -n --arg destination "$destination" '{template:"loop-crm",destination:$destination,next:("Review " + $destination + ", then run fullstack.sh prepare " + $destination + " --dry-run.")}'
+    ;;
+  prepare)
+    [[ $# -ge 1 ]] || die "usage: fullstack.sh prepare <project-folder> [--dry-run]"
+    project="$1"; shift; dry=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in --dry-run) dry=1; shift ;; *) die "unexpected prepare argument: $1" ;; esac
+    done
+    project=$(absolute_dir "$project")
+    contract="$project/fullstack.yaml"
+    [[ -f "$contract" ]] || die "project must contain fullstack.yaml at its root"
+    manifest=$(project_manifest "$project")
+    file_count=$(printf '%s' "$manifest" | "$JQ_BIN" 'length')
+    byte_count=$(printf '%s' "$manifest" | "$JQ_BIN" '[.[].size] | add // 0')
+    env_names=$(declared_env "$contract")
+    triggers=$(declared_triggers "$contract")
+    if [[ "$dry" -eq 1 ]]; then
+      "$JQ_BIN" -n --arg project "$project" --argjson files "$file_count" --argjson bytes "$byte_count" \
+        --argjson requiredSecrets "$env_names" --argjson triggers "$triggers" \
+        '{dryRun:true,networkRequests:0,project:$project,contract:"fullstack.yaml",files:$files,bytes:$bytes,requiredSecrets:$requiredSecrets,triggers:$triggers,next:"Run prepare again without --dry-run to stage and remotely validate these exact files."}'
+      exit 0
+    fi
+    load_account_key
+    contract_sha=$(file_sha "$contract")
+    manifest_sha=$(printf '%s' "$manifest" | text_sha)
+    bundle_hash=$(printf '%s\n%s\n' "$contract_sha" "$manifest_sha" | text_sha)
+    drive_response=$(api_account POST "$BASE_URL/api/v1/drives" "$("$JQ_BIN" -n --arg name "Fullstack staging ${bundle_hash:0:8}" '{name:$name,isDefault:false}')")
+    drive_id=$(printf '%s' "$drive_response" | "$JQ_BIN" -r '.drive.id // .id // empty')
+    [[ "$drive_id" == drv_* && "$drive_id" != *[!A-Za-z0-9_-]* ]] || die "invalid Drive create response"
+    while IFS= read -r entry; do stage_project_file "$drive_id" "$project" "$entry"; done < <(printf '%s' "$manifest" | "$JQ_BIN" -c '.[]')
+    plan_hash=$(printf '%s\n%s\n%s\n' "$drive_id" "$contract_sha" "$manifest_sha" | text_sha)
+    plan_id="fsp_${plan_hash:0:24}"
+    receipt=$("$JQ_BIN" -n --arg planId "$plan_id" --arg driveId "$drive_id" \
+      --arg projectRoot "$project" --arg contractPath "$contract" \
+      --arg contractSha256 "$contract_sha" --arg manifestSha256 "$manifest_sha" \
+      --argjson manifest "$manifest" --argjson declaredEnv "$env_names" \
+      '{planId:$planId,sourceType:"project",projectRoot:$projectRoot,driveId:$driveId,contractPath:$contractPath,contractSha256:$contractSha256,manifestSha256:$manifestSha256,manifest:$manifest,declaredEnv:$declaredEnv,approved:false,approvedAt:null}')
+    validation=$(remote_validate "$receipt")
+    receipt=$("$JQ_BIN" -n --argjson receipt "$receipt" --argjson validation "$validation" --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '$receipt + {remoteValidation:$validation,validatedAt:$at}')
+    write_receipt "$(receipt_path "$plan_id")" "$receipt"
+    "$JQ_BIN" -n --arg planId "$plan_id" --arg driveId "$drive_id" --argjson validation "$validation" \
+      '$validation + {planId:$planId,state:"validated",driveId:$driveId,approved:false,next:("Review this exact validated plan, then run fullstack.sh approve " + $planId + ".")}'
+    ;;
   list)
     [[ $# -eq 0 ]] || die "usage: fullstack.sh list"
     load_account_key; api_account GET "$BASE_URL/api/v1/fullstack" | "$JQ_BIN" .
@@ -207,10 +370,19 @@ case "$CMD" in
       --arg contractPath "$contract" --arg manifestPath "$manifest" \
       --arg contractSha256 "$contract_sha" --arg manifestSha256 "$manifest_sha" \
       --argjson manifest "$normalized" --argjson declaredEnv "$env_names" \
-      '{planId:$planId,driveId:$driveId,contractPath:$contractPath,manifestPath:$manifestPath,contractSha256:$contractSha256,manifestSha256:$manifestSha256,manifest:$manifest,declaredEnv:$declaredEnv,approved:false,approvedAt:null}')
+      '{planId:$planId,sourceType:"legacy",driveId:$driveId,contractPath:$contractPath,manifestPath:$manifestPath,contractSha256:$contractSha256,manifestSha256:$manifestSha256,manifest:$manifest,declaredEnv:$declaredEnv,approved:false,approvedAt:null}')
     write_receipt "$(receipt_path "$plan_id")" "$receipt"
     "$JQ_BIN" -n --arg planId "$plan_id" --arg driveId "$drive" --argjson files "$(printf '%s' "$normalized" | $JQ_BIN 'length')" --argjson declaredEnv "$env_names" \
       '{planId:$planId,state:"planned",driveId:$driveId,fileCount:$files,requiredSecrets:$declaredEnv,next:"Review the plan, then run fullstack.sh approve <plan-id>."}'
+    ;;
+  validate)
+    [[ $# -eq 1 ]] || die "usage: fullstack.sh validate <plan-id>"
+    plan_id="$1"; receipt=$(read_receipt "$plan_id"); verify_receipt_content "$receipt"
+    load_account_key
+    validation=$(remote_validate "$receipt")
+    receipt=$("$JQ_BIN" -n --argjson receipt "$receipt" --argjson validation "$validation" --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '$receipt + {remoteValidation:$validation,validatedAt:$at}')
+    write_receipt "$(receipt_path "$plan_id")" "$receipt"
+    "$JQ_BIN" -n --arg planId "$plan_id" --argjson validation "$validation" '$validation + {planId:$planId,state:"validated",provisioned:false}'
     ;;
   approve)
     [[ $# -eq 1 ]] || die "usage: fullstack.sh approve <plan-id>"
@@ -244,16 +416,17 @@ case "$CMD" in
       [[ "$(printf '%s' "$receipt" | "$JQ_BIN" '.declaredEnv | length')" -eq 0 ]] || die "this contract requires --secrets-from with a mode-600 JSON file"
     fi
     if [[ "$dry" -eq 1 ]]; then
-      "$JQ_BIN" -n --arg planId "$plan_id" '{dryRun:true,planId:$planId,approved:true,validated:true,networkRequests:0}'
+      "$JQ_BIN" -n --arg planId "$plan_id" '{dryRun:true,planId:$planId,approved:true,localContentVerified:true,remoteValidated:false,networkRequests:0,next:"Run deploy again without --dry-run to repeat remote validation and provision this exact plan."}'
       exit 0
     fi
     load_account_key
+    validation=$(remote_validate "$receipt" "$env_json")
     contract_path=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.contractPath')
     yaml=$(cat "$contract_path")
     body=$($JQ_BIN -n --arg yaml "$yaml" --arg driveId "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')" --argjson manifest "$(printf '%s' "$receipt" | "$JQ_BIN" -c '.manifest')" --argjson env "$env_json" '{yaml:$yaml,driveId:$driveId,manifest:$manifest,env:$env}')
     idem=$(make_idempotency_key)
     created=$(api_account POST "$BASE_URL/api/v1/fullstack" "$body" "$idem")
-    unset body env_json yaml
+    unset body env_json yaml validation
     app_id=$(printf '%s' "$created" | "$JQ_BIN" -r '.appId // empty')
     claim_token=$(printf '%s' "$created" | "$JQ_BIN" -r '.claimToken // empty')
     valid_app_id "$app_id"; [[ "$claim_token" == clm_* ]] || die "invalid Fullstack create response"
@@ -261,17 +434,31 @@ case "$CMD" in
     while [[ "$state" == provisioning && "$waited" -lt 180 ]]; do
       sleep 2; waited=$((waited + 2)); status=$(api_account GET "$BASE_URL/api/v1/fullstack/$app_id/status"); state=$(printf '%s' "$status" | "$JQ_BIN" -r '.state // empty')
     done
-    [[ "$state" == live || "$state" == failed ]] || die "Fullstack app did not reach a claimable state (state: ${state:-unknown})"
+    [[ "$state" == live || "$state" == failed ]] || die "Fullstack app did not reach a final state (state: ${state:-unknown})"
+    if [[ "$state" == failed ]]; then
+      failure_code=$(printf '%s' "$status" | "$JQ_BIN" -r '.failureCode // "provision_unknown"')
+      cleanup_body=$("$JQ_BIN" -n --arg token "$claim_token" '{token:$token}')
+      api_account DELETE "$BASE_URL/api/v1/fullstack/$app_id" "$cleanup_body" >/dev/null || true
+      unset claim_token created cleanup_body
+      die "Fullstack provisioning failed at $failure_code. Cleanup of the disposable app was requested; the validated staging Drive remains available for a corrected plan"
+    fi
     url=$(printf '%s' "$status" | "$JQ_BIN" -r '.url // empty')
-    [[ -z "$url" ]] || valid_branded_url "$url" || die "invalid Fullstack live URL"
+    [[ -n "$url" ]] && valid_branded_url "$url" || die "invalid Fullstack live URL"
     api_account POST "$BASE_URL/api/v1/fullstack/$app_id/claim" "$($JQ_BIN -n --arg token "$claim_token" '{token:$token}')" >/dev/null
     unset claim_token created
-    address_state="unavailable"
-    if [[ "$state" == live && -n "$url" ]]; then
-      if wait_for_branded_url "$url"; then address_state="ready"; else address_state="propagating"; fi
+    staging_drive="not_applicable"
+    if [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project ]]; then
+      drive_id=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')
+      if api_account DELETE "$BASE_URL/api/v1/drives/$drive_id" >/dev/null; then
+        staging_drive="removed"
+      else
+        staging_drive="retained"
+      fi
     fi
-    "$JQ_BIN" -n --arg appId "$app_id" --arg state "$state" --arg url "$url" --arg addressState "$address_state" \
-      '{appId:$appId,state:$state,persistence:"permanent",addressState:$addressState}
+    address_state="unavailable"
+    if wait_for_branded_url "$url"; then address_state="ready"; else address_state="propagating"; fi
+    "$JQ_BIN" -n --arg appId "$app_id" --arg state "$state" --arg url "$url" --arg addressState "$address_state" --arg stagingDrive "$staging_drive" \
+      '{appId:$appId,state:$state,persistence:"permanent",addressState:$addressState,stagingDrive:$stagingDrive}
       + (if $addressState == "ready" then {url:$url}
          elif $addressState == "propagating" then {next:("The app is permanent. Its address is still finishing. Run fullstack.sh status " + $appId + " in a few seconds.")}
          else {} end)'

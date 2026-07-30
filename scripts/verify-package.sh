@@ -36,6 +36,7 @@ REQUIRED_PATHS=(
   "sharenow/scripts/version.sh"
   "sharenow/scripts/lib/http.sh"
   "tests/run-tests.sh"
+  "tests/loop-crm.test.mjs"
   "tests/stubs/curl"
   "tests/stubs/npx"
   "skills/sharenow/scripts/lib/http.sh"
@@ -156,6 +157,13 @@ if [[ -f tests/run-tests.sh ]]; then
   fi
 else
   fail "missing tests/run-tests.sh"
+fi
+
+echo "[10] loop CRM starter runtime"
+if node --test tests/loop-crm.test.mjs >/dev/null 2>&1; then
+  pass "loop CRM starter passes its isolated runtime tests"
+else
+  fail "loop CRM starter runtime tests failed"
 fi
 
 # --- Summary ----------------------------------------------------------------
