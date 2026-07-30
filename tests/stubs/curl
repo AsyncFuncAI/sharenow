@@ -72,7 +72,31 @@ case "$url" in
     body="${STUB_CURL_DEVICE_TOKEN_BODY:-$body}"
     status="${STUB_CURL_DEVICE_TOKEN_STATUS:-$status}"
     ;;
+  */api/v1/channels)
+    body="${STUB_CURL_CHANNEL_CREATE_BODY:-$body}"
+    status="${STUB_CURL_CHANNEL_CREATE_STATUS:-$status}"
+    ;;
+  */api/v1/channels/*/claim)
+    body="${STUB_CURL_CHANNEL_CLAIM_BODY:-$body}"
+    status="${STUB_CURL_CHANNEL_CLAIM_STATUS:-$status}"
+    ;;
+  */api/v1/fullstack)
+    body="${STUB_CURL_FULLSTACK_CREATE_BODY:-$body}"
+    status="${STUB_CURL_FULLSTACK_CREATE_STATUS:-$status}"
+    ;;
+  */api/v1/fullstack/*/status)
+    body="${STUB_CURL_FULLSTACK_STATUS_BODY:-$body}"
+    status="${STUB_CURL_FULLSTACK_STATUS_STATUS:-$status}"
+    ;;
+  */api/v1/fullstack/*/claim)
+    body="${STUB_CURL_FULLSTACK_CLAIM_BODY:-$body}"
+    status="${STUB_CURL_FULLSTACK_CLAIM_STATUS:-$status}"
+    ;;
 esac
+
+if [[ "$data" == "@-" ]]; then
+  data="$(cat)"
+fi
 # Aggregate short-flag clusters like -sS or -fsS that we did not special-case.
 for arg in "$@"; do
   case "$arg" in

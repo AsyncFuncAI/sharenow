@@ -22,6 +22,10 @@ REPO_ROOT="$(cd "$HERE/.." && pwd)"
 SCRIPTS="$REPO_ROOT/sharenow/scripts"
 KB_SCRIPT="$REPO_ROOT/extras/advanced-scripts/kb.sh"
 CHANNEL_SCRIPT="$REPO_ROOT/extras/advanced-scripts/channel.sh"
+INSTALLED_CHANNEL_SCRIPT="$SCRIPTS/channel.sh"
+INSTALLED_FULLSTACK_SCRIPT="$SCRIPTS/fullstack.sh"
+INSTALLED_KB_SCRIPT="$SCRIPTS/kb.sh"
+VERSION_SCRIPT="$SCRIPTS/version.sh"
 STUBS="$HERE/stubs"
 
 # A private HOME + workdir so no test can read real credentials or write real state.
@@ -630,14 +634,18 @@ expected_installed_files="$(printf '%s\n' \
   './SKILL.md' \
   './assets/logo.svg' \
   './scripts/account.sh' \
+  './scripts/channel.sh' \
   './scripts/drive.sh' \
+  './scripts/fullstack.sh' \
+  './scripts/kb.sh' \
   './scripts/lib/http.sh' \
-  './scripts/publish.sh')"
-assert_eq "one install contains the reviewed publish, Drive, and account helpers" \
+  './scripts/publish.sh' \
+  './scripts/version.sh')"
+assert_eq "one install contains the seven reviewed capability helpers" \
   "$expected_installed_files" "$installed_files"
-assert_eq "channel helper is parked outside the installed skill" "no" \
+assert_eq "reviewed Channel helper is installed" "yes" \
   "$([[ -e "$REPO_ROOT/sharenow/scripts/channel.sh" ]] && echo yes || echo no)"
-assert_eq "local-codebase KB helper is parked outside the installed skill" "no" \
+assert_eq "public-repository KB helper is installed" "yes" \
   "$([[ -e "$REPO_ROOT/sharenow/scripts/kb.sh" ]] && echo yes || echo no)"
 assert_eq "parked channel helper is preserved" "yes" \
   "$([[ -f "$CHANNEL_SCRIPT" ]] && echo yes || echo no)"
@@ -654,11 +662,14 @@ else
 fi
 
 TESTS_RUN=$((TESTS_RUN + 1))
-if grep -REin 'channel\.sh|kb\.sh' "$REPO_ROOT/sharenow" >/dev/null 2>&1; then
-  TESTS_FAIL=$((TESTS_FAIL + 1))
-  echo "not ok $TESTS_RUN - installed skill refers to parked advanced helpers"
+if grep -Fq 'scripts/channel.sh' "$REPO_ROOT/sharenow/SKILL.md" &&
+   grep -Fq 'scripts/fullstack.sh' "$REPO_ROOT/sharenow/SKILL.md" &&
+   grep -Fq 'scripts/kb.sh' "$REPO_ROOT/sharenow/SKILL.md" &&
+   grep -Fq 'scripts/version.sh' "$REPO_ROOT/sharenow/SKILL.md"; then
+  echo "ok $TESTS_RUN - installed skill documents every All Access helper"
 else
-  echo "ok $TESTS_RUN - installed skill does not advertise parked advanced helpers"
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - installed skill is missing All Access helper guidance"
 fi
 
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -673,7 +684,7 @@ fi
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -Fq 'Why security scanners may warn' "$REPO_ROOT/README.md" &&
    grep -Fq 'exact files you approve' "$REPO_ROOT/README.md" &&
-   grep -Fq 'three shell helpers' "$REPO_ROOT/README.md"; then
+   grep -Fq 'seven shell helpers' "$REPO_ROOT/README.md"; then
   echo "ok $TESTS_RUN - README explains the compact package trust boundary before setup"
 else
   TESTS_FAIL=$((TESTS_FAIL + 1))
@@ -720,6 +731,170 @@ assert_run "publish rejects --base-url" 1 "unknown option: --base-url" -- \
     /bin/bash "$SCRIPTS/publish.sh" "$publish_wd/index.html" --base-url https://example.invalid
 assert_run "Drive rejects token command arguments" 1 "unknown global option: --token" -- \
   /bin/bash "$SCRIPTS/drive.sh" --token drv_live_test ls
+
+# ==========================================================================
+# STEP 4: All Access helper contract. These are executable behavior tests, not
+# source-text checks: every helper must parse, and each starter mission must
+# expose a no-network dry-run before it can enter the installable package.
+# ==========================================================================
+echo "# --- All Access installed helper contract ---"
+
+assert_run "installed Channel helper exposes local help" 0 "Usage: channel.sh" -- \
+  /bin/bash "$INSTALLED_CHANNEL_SCRIPT" --help
+assert_run "installed Fullstack helper exposes local help" 0 "Usage: fullstack.sh" -- \
+  /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" --help
+assert_run "installed public-repository KB helper exposes local help" 0 "Usage: kb.sh" -- \
+  /bin/bash "$INSTALLED_KB_SCRIPT" --help
+assert_run "installed version helper exposes local help" 0 "Usage: version.sh" -- \
+  /bin/bash "$VERSION_SCRIPT" --help
+
+all_access_home="$(new_workdir)"
+mkdir -p "$all_access_home/.sharenow"
+printf '%s\n' 'snk_test_all_access_12345678901234567890' > "$all_access_home/.sharenow/credentials"
+chmod 600 "$all_access_home/.sharenow/credentials"
+
+: > "$WORK/channel-dry-requests"
+assert_run "Channel create dry-run explains the claimed result" 0 "claimed Channel" -- \
+  env HOME="$all_access_home" STUB_CURL_LOG="$WORK/channel-dry-requests" \
+    /bin/bash "$INSTALLED_CHANNEL_SCRIPT" create --title "Launch room" --as codex --dry-run
+assert_eq "Channel create dry-run makes no HTTP request" "0" \
+  "$(wc -l < "$WORK/channel-dry-requests" | tr -d '[:space:]')"
+
+drive_mission="$WORK/launch-kit"
+mkdir -p "$drive_mission"
+printf '%s\n' '# Approved launch brief' > "$drive_mission/brief.md"
+: > "$WORK/drive-dry-requests"
+assert_run "Drive import dry-run previews the exact persistent file set" 0 "Launch Kit/brief.md" -- \
+  env HOME="$all_access_home" STUB_CURL_LOG="$WORK/drive-dry-requests" \
+    /bin/bash "$SCRIPTS/drive.sh" import "My Drive" "Launch Kit" --from "$drive_mission" --dry-run
+assert_eq "Drive import dry-run makes no HTTP request" "0" \
+  "$(wc -l < "$WORK/drive-dry-requests" | tr -d '[:space:]')"
+
+channel_home="$(new_workdir)"
+mkdir -p "$channel_home/.sharenow"
+printf '%s\n' 'snk_test_channel_12345678901234567890' > "$channel_home/.sharenow/credentials"
+chmod 600 "$channel_home/.sharenow/credentials"
+channel_create='{"channelId":"ch_launch123","sessionToken":"chsess_private123","claimToken":"clm_private123","memberId":"mem_owner123","channelUrl":"https://sharenow.today/ch/ch_launch123","joinUrl":"https://sharenow.today/ch/ch_launch123?via=mem_owner123"}'
+channel_out="$(env HOME="$channel_home" STUB_CURL_CHANNEL_CREATE_BODY="$channel_create" STUB_CURL_CHANNEL_CLAIM_BODY='{"success":true}' \
+  /bin/bash "$INSTALLED_CHANNEL_SCRIPT" create --title "Launch room" --as codex)"
+assert_eq "Channel create returns a claimed non-secret receipt" "claimed" \
+  "$(printf '%s' "$channel_out" | jq -r '.state')"
+assert_eq "Channel create output excludes session and claim tokens" "no" \
+  "$(printf '%s' "$channel_out" | grep -Eq 'chsess_private123|clm_private123' && echo yes || echo no)"
+channel_mode=$(stat -f '%Lp' "$channel_home/.sharenow/channels.json" 2>/dev/null || stat -c '%a' "$channel_home/.sharenow/channels.json")
+assert_eq "Channel session state is mode 600" "600" "$channel_mode"
+
+: > "$WORK/kb-dry-requests"
+assert_run "KB open dry-run accepts only an explicit public GitHub repository" 0 "public GitHub repository" -- \
+  env HOME="$all_access_home" STUB_CURL_LOG="$WORK/kb-dry-requests" \
+    /bin/bash "$INSTALLED_KB_SCRIPT" open https://github.com/pallets/click --dry-run
+assert_eq "KB open dry-run makes no HTTP request" "0" \
+  "$(wc -l < "$WORK/kb-dry-requests" | tr -d '[:space:]')"
+assert_run "KB starter path rejects the current directory before HTTP" 1 "public https github.com" -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_KB_SCRIPT" open . --dry-run
+
+kb_reuse_home="$(new_workdir)"
+mkdir -p "$kb_reuse_home/.sharenow"
+printf '%s\n' 'snk_test_kb_12345678901234567890' > "$kb_reuse_home/.sharenow/credentials"
+chmod 600 "$kb_reuse_home/.sharenow/credentials"
+env HOME="$kb_reuse_home" STUB_CURL_BODY='{"sessionId":"kb_shared123","state":"ready","reused":true}' \
+  /bin/bash "$INSTALLED_KB_SCRIPT" open https://github.com/pallets/click >/dev/null
+: > "$WORK/kb-reuse-close-requests"
+assert_run "closing a reused Codegraph session detaches without destroying it" 0 "detached" -- \
+  env HOME="$kb_reuse_home" STUB_CURL_LOG="$WORK/kb-reuse-close-requests" \
+    /bin/bash "$INSTALLED_KB_SCRIPT" close
+assert_eq "reused Codegraph close makes no delete request" "0" \
+  "$(wc -l < "$WORK/kb-reuse-close-requests" | tr -d '[:space:]')"
+
+assert_run "account capability discovery is available to the installed agent" 0 '"allAccess": true' -- \
+  env HOME="$all_access_home" STUB_CURL_BODY='{"tier":"all_access_monthly","allAccess":true,"capabilities":{}}' \
+    /bin/bash "$SCRIPTS/account.sh" capabilities
+
+version_home="$(new_workdir)"
+mkdir -p "$version_home/.sharenow"
+manifest='{"name":"sharenow","source":"AsyncFuncAI/sharenow","version":"1.14.0","latestVersion":"1.14.0","minimumVersion":"1.14.0","files":[{"path":"SKILL.md","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
+assert_run "version status reports structured drift state" 0 '"state": "update_required"' -- \
+  env HOME="$version_home" STUB_CURL_BODY="$manifest" \
+    /bin/bash "$VERSION_SCRIPT" status --force
+
+fullstack_wd="$(new_workdir)"
+cat > "$fullstack_wd/worker.yaml" <<'YAML'
+name: launch-api
+main: src/index.ts
+env:
+  - STRIPE_SECRET_KEY
+  - ANTHROPIC_API_KEY
+YAML
+cat > "$fullstack_wd/manifest.json" <<'JSON'
+[{"path":"src/index.ts","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1200}]
+JSON
+: > "$WORK/fullstack-plan-requests"
+set +e
+plan_out="$(env HOME="$all_access_home" STUB_CURL_LOG="$WORK/fullstack-plan-requests" \
+  /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" plan --contract "$fullstack_wd/worker.yaml" \
+    --drive drv_launchkit123 --manifest "$fullstack_wd/manifest.json" 2>"$WORK/fullstack-plan.err")"
+plan_rc=$?
+set -e 2>/dev/null || true
+TESTS_RUN=$((TESTS_RUN + 1))
+plan_id="$(printf '%s' "$plan_out" | jq -r '.planId // empty' 2>/dev/null)"
+if [[ "$plan_rc" -eq 0 && "$plan_id" == fsp_* ]]; then
+  echo "ok $TESTS_RUN - Fullstack plan creates a local content-bound receipt"
+else
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - Fullstack plan creates a local content-bound receipt"
+  echo "#   exit=$plan_rc planId=$plan_id stderr=$(head -c 300 "$WORK/fullstack-plan.err")"
+fi
+assert_eq "Fullstack planning makes no HTTP request" "0" \
+  "$(wc -l < "$WORK/fullstack-plan-requests" | tr -d '[:space:]')"
+assert_run "Fullstack deploy refuses an unapproved receipt" 1 "not approved" -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" deploy "$plan_id" --dry-run
+assert_run "Fullstack approval is a separate local action" 0 '"approved": true' -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" approve "$plan_id"
+printf '%s\n' '{"STRIPE_SECRET_KEY":"sk_test_example","ANTHROPIC_API_KEY":"sk-ant-test-example"}' > "$fullstack_wd/secrets.json"
+chmod 600 "$fullstack_wd/secrets.json"
+: > "$WORK/fullstack-deploy-requests"
+assert_run "approved Fullstack dry-run validates without deploying" 0 '"dryRun": true' -- \
+  env HOME="$all_access_home" STUB_CURL_LOG="$WORK/fullstack-deploy-requests" \
+    /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" deploy "$plan_id" --secrets-from "$fullstack_wd/secrets.json" --dry-run
+assert_eq "Fullstack deploy dry-run makes no HTTP request" "0" \
+  "$(wc -l < "$WORK/fullstack-deploy-requests" | tr -d '[:space:]')"
+assert_run "Fullstack refuses secret values in command arguments" 1 "unexpected deploy argument" -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" deploy "$plan_id" --secret STRIPE_SECRET_KEY=sk_test_nope
+
+: > "$WORK/fullstack-argv.log"
+fullstack_out="$(env HOME="$all_access_home" STUB_CURL_ARGV_LOG="$WORK/fullstack-argv.log" \
+  STUB_CURL_FULLSTACK_CREATE_BODY='{"appId":"fsa_launch123","claimToken":"clm_fullstack_private"}' \
+  STUB_CURL_FULLSTACK_STATUS_BODY='{"state":"live","url":"https://launch123.sharenow.today"}' \
+  STUB_CURL_FULLSTACK_CLAIM_BODY='{"success":true}' \
+  /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" deploy "$plan_id" --secrets-from "$fullstack_wd/secrets.json")"
+assert_eq "Fullstack deploy claims the live app permanently" "permanent" \
+  "$(printf '%s' "$fullstack_out" | jq -r '.persistence')"
+assert_eq "Fullstack output excludes the claim token" "no" \
+  "$(printf '%s' "$fullstack_out" | grep -q 'clm_fullstack_private' && echo yes || echo no)"
+assert_eq "Fullstack secrets never appear in process arguments" "no" \
+  "$(tr '\0' '\n' < "$WORK/fullstack-argv.log" | grep -Eq 'sk_test_example|sk-ant-test-example' && echo yes || echo no)"
+
+rollback_home="$(new_workdir)"
+mkdir -p "$rollback_home/.agents/skills/sharenow/scripts"
+printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$rollback_home/.agents/skills/sharenow/SKILL.md"
+printf '%s\n' '#!/usr/bin/env bash' 'echo old-helper' > "$rollback_home/.agents/skills/sharenow/scripts/publish.sh"
+chmod +x "$rollback_home/.agents/skills/sharenow/scripts/publish.sh"
+assert_run "failed skill update restores the previous installation" 1 "restored" -- \
+  env HOME="$rollback_home" STUB_CURL_BODY="$manifest" SHARENOW_NPX_BIN=/bin/false \
+    /bin/bash "$VERSION_SCRIPT" update --yes
+assert_eq "rollback preserves the previous skill version" "yes" \
+  "$(grep -q 'Skill version: 1.12.0' "$rollback_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
+
+update_home="$(new_workdir)"
+mkdir -p "$update_home/.agents/skills/sharenow"
+printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$update_home/.agents/skills/sharenow/SKILL.md"
+skill_sha=$(shasum -a 256 "$REPO_ROOT/sharenow/SKILL.md" | awk '{print $1}')
+success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.13.0",latestVersion:"1.13.0",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
+assert_run "verified skill update replaces the canonical install in place" 0 '"state": "current"' -- \
+  env HOME="$update_home" STUB_CURL_BODY="$success_manifest" SHARENOW_NPX_BIN="$STUBS/npx" SHARENOW_NPX_SOURCE="$REPO_ROOT/sharenow" \
+    /bin/bash "$VERSION_SCRIPT" update --yes
+assert_eq "verified update installs version 1.13.0" "yes" \
+  "$(grep -q 'Skill version: 1.13.0' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
 # ==========================================================================
 # Summary

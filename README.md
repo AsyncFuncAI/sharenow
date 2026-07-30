@@ -24,7 +24,7 @@ No console is required for the first publish. sharenow is a skill: a small set
 of scripts an agent reads once and then drives on its own. A first-party browser
 page appears only when the user chooses to connect an account.
 
-**Two capabilities, one install.**
+**A full agent workspace, one install.**
 
 - **Sites.** Publish HTML, apps, documents, images, PDFs, and video to a live URL
   at `{slug}.sharenow.today`, or a domain of your own. Three steps underneath,
@@ -32,34 +32,42 @@ page appears only when the user chooses to connect an account.
 - **Drives.** Hold private agent files in cloud folders that outlast a single
   conversation: context, memory, plans, research, assets. Hand them to another
   agent with a scoped token, never a public link.
+- **Channels.** Give several agents one claimed collaboration room with messages,
+  scoped invites, and shared tasks.
+- **Fullstack.** Deploy a lightweight app from an exact, approved Drive manifest,
+  including server behavior, data resources, and write-only secrets.
+- **Codegraph.** Map an explicit public GitHub repository and query its code
+  relationships without uploading the current working directory.
 
-The skill carries three helpers the agent uses directly. `publish.sh` for Sites,
-`drive.sh` for Drives, and `account.sh` for the rest: Site Data, profiles, custom
-domains, handles, links, service variables, analytics, browser connection, and
-key revocation.
+The skill carries seven reviewed helpers. `publish.sh`, `drive.sh`, and
+`account.sh` cover Sites, storage, account tools, and capability discovery.
+`channel.sh`, `fullstack.sh`, and `kb.sh` cover the All Access missions with
+dry-runs or content-bound approval gates. `version.sh` checks and updates the
+single canonical installation from the pinned GitHub source.
 
 ## Install
 
 ### Why security scanners may warn
 
 Publishing skills can look powerful to automated scanners because their job is
-to read local files and upload them. This package contains only three shell helpers,
-all shown below. They send the exact files you approve to the fixed
-first-party origin `https://sharenow.today`; they do not execute downloaded
-content, inspect unrelated folders, or read SSH, cloud, or shell-history files.
+to read local files and upload them. This package contains seven shell helpers,
+all shown below. They send only the explicit files or metadata each action
+requires to the fixed first-party origin `https://sharenow.today`; they do not
+execute downloaded content, inspect unrelated folders, or read SSH, cloud, or
+shell-history files.
+For Site publishing, that means only the exact files you approve.
 Account connection happens on a first-party browser page, so an email code or
 API key never needs to be pasted into an agent chat.
 
 The publish helper automatically excludes Git metadata, sharenow private state,
 and `node_modules`. It fails closed when a target contains `.env` or a common
-private-key file type.
+private-key file type. Codegraph accepts only a public GitHub URL. Fullstack
+requires a local hash-bound plan, separate approval, and mode-600 secret file.
+Channel credentials remain in mode-600 local state and are not printed.
 
 You can verify every installed byte against the signed-in-independent manifest
 at [sharenow.today/.well-known/sharenow-skill.json](https://sharenow.today/.well-known/sharenow-skill.json).
-The higher-blast-radius collaboration and codebase-upload experiments remain
-outside the installed package.
-
-One skill, the same three scripts, wherever your local agent runs. Re-run the
+One skill, the same seven scripts, wherever your local agent runs. Re-run the
 same command later to update it in place.
 
 **Universal (recommended).** Anywhere the `skills` CLI runs:
@@ -94,17 +102,21 @@ sharenow/
 └── scripts/
     ├── publish.sh      publish and update Sites (create, upload, finalize)
     ├── drive.sh        private Drive storage and scoped-token sharing
-    └── account.sh      browser connection, Site Data, profiles, domains,
-                        handles, links, variables, analytics, and key revocation
+    ├── account.sh      browser connection, capabilities, analytics, and account tools
+    ├── channel.sh      claimed collaboration with private local sessions
+    ├── fullstack.sh    local planning, approval, and claimed app deployment
+    ├── kb.sh           public-GitHub Codegraph sessions and queries
+    ├── version.sh      pinned-source drift checks and verified updates
+    └── lib/http.sh     shared response handling
 ```
 
 Every other install path in this repo (`skills/`, `hermes/`, the plugin
 manifests) is generated from `sharenow/`. That directory is the single source of
 truth.
 
-Advanced channel and local-codebase Knowledge Base helpers are preserved under
-`extras/advanced-scripts/` for future security review. They are not part of the
-installed skill.
+Historical advanced-script prototypes remain under `extras/advanced-scripts/`
+for regression coverage. The installed helpers are the smaller reviewed
+implementations under the canonical `sharenow/` directory.
 
 ## Layout
 

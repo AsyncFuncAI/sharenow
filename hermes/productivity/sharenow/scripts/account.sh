@@ -21,6 +21,7 @@ Global options:
 Connection:
   login [--client <name>] Connect in a first-party browser page. The key is
                           saved locally and is never printed in chat.
+  capabilities            Show the account tier and available product features
 
 Sites:
   sites                                  List your Sites
@@ -247,6 +248,10 @@ jobj() { "$JQ_BIN" -n "$@"; }
 req="api_json"
 
 case "$CMD" in
+  capabilities)
+    [[ $# -eq 0 ]] || die "capabilities accepts no arguments"
+    $req GET "$BASE_URL/api/v1/account/capabilities" | pp ;;
+
   sites)
     $req GET "$BASE_URL/api/v1/publishes" | pp ;;
 

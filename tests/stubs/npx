@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ -n "${SHARENOW_NPX_SOURCE:-}" ]] || exit 64
+target="$HOME/.agents/skills/sharenow"
+mkdir -p "$(dirname "$target")"
+cp -Rp "$SHARENOW_NPX_SOURCE" "$target"
