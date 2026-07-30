@@ -754,9 +754,9 @@ printf '%s\n' 'snk_test_all_access_12345678901234567890' > "$all_access_home/.sh
 chmod 600 "$all_access_home/.sharenow/credentials"
 
 : > "$WORK/channel-dry-requests"
-assert_run "Channel create dry-run explains the claimed result" 0 "claimed Channel" -- \
+assert_run "Channel create dry-run explains the private owner handoff" 0 "private overlord URL" -- \
   env HOME="$all_access_home" STUB_CURL_LOG="$WORK/channel-dry-requests" \
-    /bin/bash "$INSTALLED_CHANNEL_SCRIPT" create --title "Launch room" --as codex --dry-run
+    /bin/bash "$INSTALLED_CHANNEL_SCRIPT" create --title "Launch room" --dry-run
 assert_eq "Channel create dry-run makes no HTTP request" "0" \
   "$(wc -l < "$WORK/channel-dry-requests" | tr -d '[:space:]')"
 
@@ -774,13 +774,21 @@ channel_home="$(new_workdir)"
 mkdir -p "$channel_home/.sharenow"
 printf '%s\n' 'snk_test_channel_12345678901234567890' > "$channel_home/.sharenow/credentials"
 chmod 600 "$channel_home/.sharenow/credentials"
-channel_create='{"channelId":"ch_launch123","sessionToken":"chsess_private123","claimToken":"clm_private123","memberId":"mem_owner123","channelUrl":"https://sharenow.today/ch/ch_launch123","joinUrl":"https://sharenow.today/ch/ch_launch123?via=mem_owner123"}'
-channel_out="$(env HOME="$channel_home" STUB_CURL_CHANNEL_CREATE_BODY="$channel_create" STUB_CURL_CHANNEL_CLAIM_BODY='{"success":true}' \
-  /bin/bash "$INSTALLED_CHANNEL_SCRIPT" create --title "Launch room" --as codex)"
+channel_create='{"channelId":"ch_launch123","sessionToken":"chsess_private123","claimToken":"clm_private123","memberId":"mem_owner123","channelUrl":"https://sharenow.today/ch/ch_launch123","overlordUrl":"https://sharenow.today/ch/ch_launch123#session=chsess_private123","joinUrl":"https://sharenow.today/api/v1/channels/ch_launch123/join"}'
+channel_out="$(env HOME="$channel_home" STUB_CURL_CHANNEL_CREATE_BODY="$channel_create" STUB_CURL_CHANNEL_CLAIM_BODY='{"success":true,"expiresAt":"2026-08-05T12:00:00.000Z"}' \
+  /bin/bash "$INSTALLED_CHANNEL_SCRIPT" create --title "Launch room")"
 assert_eq "Channel create returns a claimed non-secret receipt" "claimed" \
   "$(printf '%s' "$channel_out" | jq -r '.state')"
-assert_eq "Channel create output excludes session and claim tokens" "no" \
-  "$(printf '%s' "$channel_out" | grep -Eq 'chsess_private123|clm_private123' && echo yes || echo no)"
+assert_eq "Channel create returns the private overlord URL" "https://sharenow.today/ch/ch_launch123#session=chsess_private123" \
+  "$(printf '%s' "$channel_out" | jq -r '.overlordUrl')"
+assert_eq "Channel create returns the hard expiry" "2026-08-05T12:00:00.000Z" \
+  "$(printf '%s' "$channel_out" | jq -r '.expiresAt')"
+assert_eq "Channel create output excludes the claim token" "no" \
+  "$(printf '%s' "$channel_out" | grep -Eq 'clm_private123' && echo yes || echo no)"
+assert_eq "Channel session appears once inside the private URL" "1" \
+  "$(printf '%s' "$channel_out" | grep -o 'chsess_private123' | wc -l | tr -d '[:space:]')"
+assert_eq "Channel create has no separate session field" "false" \
+  "$(printf '%s' "$channel_out" | jq 'has("sessionToken")')"
 channel_mode=$(stat -f '%Lp' "$channel_home/.sharenow/channels.json" 2>/dev/null || stat -c '%a' "$channel_home/.sharenow/channels.json")
 assert_eq "Channel session state is mode 600" "600" "$channel_mode"
 
@@ -812,7 +820,7 @@ assert_run "account capability discovery is available to the installed agent" 0 
 
 version_home="$(new_workdir)"
 mkdir -p "$version_home/.sharenow"
-manifest='{"name":"sharenow","source":"AsyncFuncAI/sharenow","version":"1.14.0","latestVersion":"1.14.0","minimumVersion":"1.14.0","files":[{"path":"SKILL.md","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
+manifest='{"name":"sharenow","source":"AsyncFuncAI/sharenow","version":"1.15.0","latestVersion":"1.15.0","minimumVersion":"1.15.0","files":[{"path":"SKILL.md","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
 assert_run "version status reports structured drift state" 0 '"state": "update_required"' -- \
   env HOME="$version_home" STUB_CURL_BODY="$manifest" \
     /bin/bash "$VERSION_SCRIPT" status --force
@@ -897,12 +905,12 @@ update_home="$(new_workdir)"
 mkdir -p "$update_home/.agents/skills/sharenow"
 printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$update_home/.agents/skills/sharenow/SKILL.md"
 skill_sha=$(shasum -a 256 "$REPO_ROOT/sharenow/SKILL.md" | awk '{print $1}')
-success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.13.0",latestVersion:"1.13.0",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
+success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.14.0",latestVersion:"1.14.0",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
 assert_run "verified skill update replaces the canonical install in place" 0 '"state": "current"' -- \
   env HOME="$update_home" STUB_CURL_BODY="$success_manifest" SHARENOW_NPX_BIN="$STUBS/npx" SHARENOW_NPX_SOURCE="$REPO_ROOT/sharenow" \
     /bin/bash "$VERSION_SCRIPT" update --yes
-assert_eq "verified update installs version 1.13.0" "yes" \
-  "$(grep -q 'Skill version: 1.13.0' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
+assert_eq "verified update installs version 1.14.0" "yes" \
+  "$(grep -q 'Skill version: 1.14.0' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
 # ==========================================================================
 # Summary

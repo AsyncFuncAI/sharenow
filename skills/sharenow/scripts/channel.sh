@@ -175,7 +175,7 @@ case "$CMD" in
     api_account GET "$BASE_URL/api/v1/channels" | "$JQ_BIN" .
     ;;
   create)
-    title=""; name="agent"; dry=0
+    title=""; name=""; dry=0
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --title) [[ $# -ge 2 ]] || die "--title requires text"; title="$2"; shift 2 ;;
@@ -186,22 +186,29 @@ case "$CMD" in
     done
     [[ -n "${title// }" ]] || die "--title is required"
     if [[ "$dry" -eq 1 ]]; then
-      dry_receipt "create" "Create and immediately claim a Channel titled '$title'; save the creator session privately; return only the claimed Channel and agent join URLs."
+      dry_receipt "create" "Create and immediately claim a Channel titled '$title'; save the owner session privately; return the private overlord URL, agent join URL, and hard expiry."
       exit 0
     fi
     load_account_key
-    created=$(api_account POST "$BASE_URL/api/v1/channels" "$($JQ_BIN -n --arg title "$title" --arg displayName "$name" '{title:$title,displayName:$displayName}')")
+    create_body=$($JQ_BIN -n --arg title "$title" --arg displayName "$name" '{title:$title} + (if $displayName == "" then {} else {displayName:$displayName} end)')
+    created=$(api_account POST "$BASE_URL/api/v1/channels" "$create_body")
     id=$(printf '%s' "$created" | "$JQ_BIN" -r '.channelId // empty')
     token=$(printf '%s' "$created" | "$JQ_BIN" -r '.sessionToken // empty')
-    claim=$(printf '%s' "$created" | "$JQ_BIN" -r '.claimToken // empty')
+    claim_token=$(printf '%s' "$created" | "$JQ_BIN" -r '.claimToken // empty')
     member=$(printf '%s' "$created" | "$JQ_BIN" -r '.memberId // empty')
     channel_url=$(printf '%s' "$created" | "$JQ_BIN" -r '.channelUrl // empty')
+    overlord_url=$(printf '%s' "$created" | "$JQ_BIN" -r '.overlordUrl // empty')
     join_url=$(printf '%s' "$created" | "$JQ_BIN" -r '.joinUrl // empty')
-    [[ "$id" == ch_* && "$token" == chsess_* && "$claim" == clm_* && -n "$member" && -n "$channel_url" && -n "$join_url" ]] || die "invalid Channel create response"
-    api_account POST "$BASE_URL/api/v1/channels/$id/claim" "$($JQ_BIN -n --arg claimToken "$claim" '{claimToken:$claimToken}')" >/dev/null
-    save_session "$id" "$name" "$token" "$member" "$channel_url" "$join_url"
-    unset token claim created
-    "$JQ_BIN" -n --arg channelId "$id" --arg channelUrl "$channel_url" --arg joinUrl "$join_url" '{channelId:$channelId,state:"claimed",channelUrl:$channelUrl,agentJoinUrl:$joinUrl}'
+    [[ "$id" == ch_* && "$token" == chsess_* && "$claim_token" == clm_* && -n "$member" && -n "$channel_url" && -n "$join_url" ]] || die "invalid Channel create response"
+    [[ "$overlord_url" == "$BASE_URL/ch/$id#session=$token" ]] || die "invalid private overlord URL in Channel create response"
+    claimed=$(api_account POST "$BASE_URL/api/v1/channels/$id/claim" "$($JQ_BIN -n --arg claimToken "$claim_token" '{claimToken:$claimToken}')")
+    expires_at=$(printf '%s' "$claimed" | "$JQ_BIN" -r '.expiresAt // empty')
+    [[ -n "$expires_at" ]] || die "Channel claim response did not include the hard expiry"
+    owner_name="${name:-overlord}"
+    save_session "$id" "$owner_name" "$token" "$member" "$channel_url" "$join_url"
+    unset token claim_token created claimed create_body
+    "$JQ_BIN" -n --arg channelId "$id" --arg overlordUrl "$overlord_url" --arg joinUrl "$join_url" --arg expiresAt "$expires_at" \
+      '{channelId:$channelId,state:"claimed",overlordUrl:$overlordUrl,agentJoinUrl:$joinUrl,expiresAt:$expiresAt}'
     ;;
   join)
     [[ $# -ge 1 ]] || die "usage: channel.sh join <channel-url-or-id> --as <name> [--dry-run]"

@@ -38,8 +38,9 @@ The default `<base>` is `https://sharenow.today`.
 - Service-variable values are write-only. The API never returns them.
 - Start higher-impact helpers with their dry-run or plan command. Fullstack
   approval must be a separate action after the user reviews the plan.
-- Never accept Channel sessions, claim tokens, API keys, or Fullstack secret
-  values in command arguments or chat.
+- Never accept raw Channel sessions, claim tokens, API keys, or Fullstack secret
+  values in command arguments or chat. A create receipt may return the Channel
+  session once inside its private overlord URL, never as a separate value.
 - Never pass a local directory to the installed Codegraph helper.
 
 ## Verification
