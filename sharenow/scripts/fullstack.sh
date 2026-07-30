@@ -76,6 +76,37 @@ file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
 valid_plan_id() { [[ "$1" == fsp_* && "$1" != *[!A-Za-z0-9_-]* ]] || die "invalid Fullstack plan id"; }
 valid_app_id() { [[ "$1" == fsa_* && "$1" != *[!A-Za-z0-9_-]* ]] || die "invalid Fullstack app id"; }
 
+valid_branded_url() {
+  local value="$1" host label
+  case "$value" in
+    https://*.sharenow.today|https://*.sharenow.today/) ;;
+    *) return 1 ;;
+  esac
+  host="${value#https://}"; host="${host%/}"
+  [[ "$host" != */* && "$host" != *@* && "$host" != *:* ]] || return 1
+  label="${host%.sharenow.today}"
+  [[ -n "$label" && "$label" != "$host" && "$label" != *.* ]] || return 1
+  [[ "$label" != *[!a-z0-9-]* && "$label" != -* && "$label" != *- ]] || return 1
+}
+
+wait_for_branded_url() {
+  local url="$1" attempt=0 code delay
+  valid_branded_url "$url" || die "invalid Fullstack live URL"
+  while [[ "$attempt" -lt 6 ]]; do
+    code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 5 "$url" || true)
+    case "$code" in
+      [12345][0-9][0-9]) [[ "$code" != 404 ]] && return 0 ;;
+    esac
+    attempt=$((attempt + 1))
+    [[ "$attempt" -lt 6 ]] || break
+    if [[ "$attempt" -le 2 ]]; then delay=1
+    elif [[ "$attempt" -le 4 ]]; then delay=2
+    else delay=3; fi
+    sleep "$delay"
+  done
+  return 1
+}
+
 receipt_path() {
   valid_plan_id "$1"
   printf '%s/%s.json\n' "$PLANS_DIR" "$1"
@@ -231,10 +262,19 @@ case "$CMD" in
       sleep 2; waited=$((waited + 2)); status=$(api_account GET "$BASE_URL/api/v1/fullstack/$app_id/status"); state=$(printf '%s' "$status" | "$JQ_BIN" -r '.state // empty')
     done
     [[ "$state" == live || "$state" == failed ]] || die "Fullstack app did not reach a claimable state (state: ${state:-unknown})"
+    url=$(printf '%s' "$status" | "$JQ_BIN" -r '.url // empty')
+    [[ -z "$url" ]] || valid_branded_url "$url" || die "invalid Fullstack live URL"
     api_account POST "$BASE_URL/api/v1/fullstack/$app_id/claim" "$($JQ_BIN -n --arg token "$claim_token" '{token:$token}')" >/dev/null
     unset claim_token created
-    url=$(printf '%s' "$status" | "$JQ_BIN" -r '.url // empty')
-    "$JQ_BIN" -n --arg appId "$app_id" --arg state "$state" --arg url "$url" '{appId:$appId,state:$state,persistence:"permanent"} + (if $url == "" then {} else {url:$url} end)'
+    address_state="unavailable"
+    if [[ "$state" == live && -n "$url" ]]; then
+      if wait_for_branded_url "$url"; then address_state="ready"; else address_state="propagating"; fi
+    fi
+    "$JQ_BIN" -n --arg appId "$app_id" --arg state "$state" --arg url "$url" --arg addressState "$address_state" \
+      '{appId:$appId,state:$state,persistence:"permanent",addressState:$addressState}
+      + (if $addressState == "ready" then {url:$url}
+         elif $addressState == "propagating" then {next:("The app is permanent. Its address is still finishing. Run fullstack.sh status " + $appId + " in a few seconds.")}
+         else {} end)'
     ;;
   status)
     [[ $# -eq 1 ]] || die "usage: fullstack.sh status <app-id>"

@@ -92,6 +92,13 @@ case "$url" in
     body="${STUB_CURL_FULLSTACK_CLAIM_BODY:-$body}"
     status="${STUB_CURL_FULLSTACK_CLAIM_STATUS:-$status}"
     ;;
+  https://*.sharenow.today|https://*.sharenow.today/)
+    if [[ -n "${STUB_CURL_FULLSTACK_URL_STATUS_FILE:-}" && -f "$STUB_CURL_FULLSTACK_URL_STATUS_FILE" ]]; then
+      status="$(head -n 1 "$STUB_CURL_FULLSTACK_URL_STATUS_FILE")"
+      tail -n +2 "$STUB_CURL_FULLSTACK_URL_STATUS_FILE" > "$STUB_CURL_FULLSTACK_URL_STATUS_FILE.next"
+      mv "$STUB_CURL_FULLSTACK_URL_STATUS_FILE.next" "$STUB_CURL_FULLSTACK_URL_STATUS_FILE"
+    fi
+    ;;
 esac
 
 if [[ "$data" == "@-" ]]; then

@@ -862,7 +862,11 @@ assert_run "Fullstack refuses secret values in command arguments" 1 "unexpected 
   env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" deploy "$plan_id" --secret STRIPE_SECRET_KEY=sk_test_nope
 
 : > "$WORK/fullstack-argv.log"
+printf '%s\n' 404 200 > "$WORK/fullstack-url-statuses"
+: > "$WORK/fullstack-url-requests"
 fullstack_out="$(env HOME="$all_access_home" STUB_CURL_ARGV_LOG="$WORK/fullstack-argv.log" \
+  STUB_CURL_LOG="$WORK/fullstack-url-requests" \
+  STUB_CURL_FULLSTACK_URL_STATUS_FILE="$WORK/fullstack-url-statuses" \
   STUB_CURL_FULLSTACK_CREATE_BODY='{"appId":"fsa_launch123","claimToken":"clm_fullstack_private"}' \
   STUB_CURL_FULLSTACK_STATUS_BODY='{"state":"live","url":"https://launch123.sharenow.today"}' \
   STUB_CURL_FULLSTACK_CLAIM_BODY='{"success":true}' \
@@ -871,6 +875,10 @@ assert_eq "Fullstack deploy claims the live app permanently" "permanent" \
   "$(printf '%s' "$fullstack_out" | jq -r '.persistence')"
 assert_eq "Fullstack output excludes the claim token" "no" \
   "$(printf '%s' "$fullstack_out" | grep -q 'clm_fullstack_private' && echo yes || echo no)"
+assert_eq "Fullstack waits through one branded-host 404 before returning its URL" "2" \
+  "$(grep -c $'GET\thttps://launch123.sharenow.today' "$WORK/fullstack-url-requests" | tr -d '[:space:]')"
+assert_eq "Fullstack prints the branded URL after readiness" "https://launch123.sharenow.today" \
+  "$(printf '%s' "$fullstack_out" | jq -r '.url')"
 assert_eq "Fullstack secrets never appear in process arguments" "no" \
   "$(tr '\0' '\n' < "$WORK/fullstack-argv.log" | grep -Eq 'sk_test_example|sk-ant-test-example' && echo yes || echo no)"
 
