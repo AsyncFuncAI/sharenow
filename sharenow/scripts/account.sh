@@ -100,6 +100,30 @@ json_field() {
   ' "$field"
 }
 
+local_trial_sites() {
+  local state_file=".sharenow/state.json"
+  [[ -f "$state_file" ]] || return 0
+  node - "$state_file" <<'NODE'
+const fs = require("node:fs");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+  const publishes = state && typeof state.publishes === "object" ? state.publishes : {};
+  const sites = Object.keys(publishes)
+    .filter((slug) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug))
+    .map((slug, index) => ({
+      slug,
+      token: publishes[slug]?.claimToken,
+      expiresAt: Date.parse(publishes[slug]?.expiresAt ?? "") || 0,
+      index,
+    }))
+    .filter(({ token }) => typeof token === "string" && /^clm_[A-Za-z0-9_-]{20,}$/.test(token))
+    .sort((left, right) => right.expiresAt - left.expiresAt || right.index - left.index)
+    .slice(0, 20);
+  for (const { slug, token } of sites) process.stdout.write(`${slug}\t${token}\n`);
+} catch {}
+NODE
+}
+
 device_post() {
   local path="$1" body="$2" out code
   out=$(mktemp)
@@ -119,6 +143,74 @@ save_credentials() {
   printf '%s\n' "$key" > "$tmp"
   chmod 600 "$tmp"
   mv "$tmp" "$CREDENTIALS_FILE"
+}
+
+update_local_site_claim() {
+  local state_file="$1" slug="$2" state="$3"
+  node - "$state_file" "$slug" "$state" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const stateFile = process.argv[2];
+const slug = process.argv[3];
+const claimState = process.argv[4];
+let temporary;
+try {
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  const entry = state?.publishes?.[slug];
+  if (!entry || typeof entry !== "object") process.exit(0);
+  delete entry.claimToken;
+  delete entry.claimUrl;
+  delete entry.expiresAt;
+  if (claimState === "permanent") entry.persistence = "permanent";
+  temporary = path.join(path.dirname(stateFile), `.state.${process.pid}.tmp`);
+  fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, stateFile);
+} catch {
+  if (temporary) try { fs.rmSync(temporary, { force: true }); } catch {}
+  process.exit(1);
+}
+NODE
+}
+
+claim_local_trial_sites() {
+  local key="$1" state_file=".sharenow/state.json" claimed=0 slug token body_file out code message
+  [[ -f "$state_file" ]] || return 0
+  while IFS=$'\t' read -r slug token; do
+    [[ -n "$slug" && -n "$token" ]] || continue
+    umask 077
+    body_file=$(mktemp)
+    printf '{"token":"%s"}' "$token" > "$body_file"
+    out=$(mktemp)
+    if ! code=$(printf 'header = "authorization: Bearer %s"\n' "$key" | curl --config - \
+      -sS -o "$out" -w "%{http_code}" -X POST \
+      "$BASE_URL/api/v1/publish/$slug/claim" \
+      -H "content-type: application/json" \
+      --data-binary "@$body_file"); then
+      rm -f "$body_file" "$out"
+      continue
+    fi
+    if [[ "$code" -ge 200 && "$code" -lt 300 ]]; then
+      if ! update_local_site_claim "$state_file" "$slug" permanent; then
+        echo "warning: a Site was recovered, but $state_file could not be updated." >&2
+      fi
+      claimed=$((claimed + 1))
+    elif [[ "$code" -eq 403 || "$code" -eq 404 || "$code" -eq 410 ]]; then
+      if ! update_local_site_claim "$state_file" "$slug" stale; then
+        echo "warning: stale recovery state could not be removed from $state_file." >&2
+      fi
+    elif [[ "$code" -eq 409 ]]; then
+      message=$(json_field message < "$out" 2>/dev/null || true)
+      if [[ "$message" == *"already claimed"* || "$message" == *"was claimed"* ]]; then
+        if ! update_local_site_claim "$state_file" "$slug" stale; then
+          echo "warning: stale recovery state could not be removed from $state_file." >&2
+        fi
+      fi
+    fi
+    rm -f "$body_file" "$out"
+  done < <(local_trial_sites)
+  if [[ "$claimed" -gt 0 ]]; then
+    echo "Recovered $claimed local trial Site(s) into this account." >&2
+  fi
 }
 
 login() {
@@ -143,7 +235,6 @@ login() {
   interval=$(printf '%s' "$DEVICE_HTTP_BODY" | json_field interval) || interval=3
   [[ "$grant_id" == agd_* && "$device_secret" == ags_* && "$verification_url" == https://sharenow.today/connect/agent* ]] \
     || die "invalid connection response"
-
   echo "Open this secure sharenow page to connect:" >&2
   echo "$verification_url" >&2
   if [[ "${SHARENOW_NO_BROWSER_OPEN:-}" == "1" ]]; then
@@ -156,7 +247,7 @@ login() {
 
   while true; do
     device_post "/api/auth/agent/device/token" \
-      "$(printf '{\"grantId\":\"%s\",\"deviceSecret\":\"%s\"}' "$grant_id" "$device_secret")"
+      "$(printf '{"grantId":"%s","deviceSecret":"%s"}' "$grant_id" "$device_secret")"
     if [[ "$DEVICE_HTTP_CODE" -eq 202 ]]; then
       sleep "$interval"
       continue
@@ -167,6 +258,7 @@ login() {
     api_key=$(printf '%s' "$DEVICE_HTTP_BODY" | json_field apiKey) || die "invalid token response"
     [[ "$status" == "connected" ]] && valid_account_key "$api_key" || die "invalid token response"
     save_credentials "$api_key"
+    claim_local_trial_sites "$api_key"
     unset api_key DEVICE_HTTP_BODY device_secret
     echo "sharenow connected. Credentials were saved locally and were not printed." >&2
     return 0

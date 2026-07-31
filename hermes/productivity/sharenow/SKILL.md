@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.15.0**
+**Skill version: 1.16.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
