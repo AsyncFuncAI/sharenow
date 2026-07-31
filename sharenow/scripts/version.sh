@@ -97,17 +97,35 @@ update_config_field() {
   write_config "$(printf '%s' "$current" | "$JQ_BIN" --arg field "$field" --argjson value "$value" '.[$field]=$value')"
 }
 
+verify_dir() {
+  local root="$1" manifest="$2" expected_version actual_version path expected actual
+  expected_version=$(printf '%s' "$manifest" | "$JQ_BIN" -r '.version')
+  [[ -f "$root/SKILL.md" ]] || return 1
+  actual_version=$(sed -n 's/^\*\*Skill version: \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\*\*$/\1/p' "$root/SKILL.md" | head -1)
+  [[ "$actual_version" == "$expected_version" ]] || return 1
+  while IFS=$'\t' read -r path expected; do
+    [[ -n "$path" && -f "$root/$path" ]] || return 1
+    actual=$(shasum -a 256 "$root/$path" | awk '{print $1}')
+    [[ "$actual" == "$expected" ]] || return 1
+  done < <(printf '%s' "$manifest" | "$JQ_BIN" -r '.files[] | [.path,.sha256] | @tsv')
+}
+
 status_json() {
-  local manifest="$1" current latest minimum state
+  local manifest="$1" current latest minimum released state integrity
   current=$(current_version)
+  released=$(printf '%s' "$manifest" | "$JQ_BIN" -r '.version')
   latest=$(printf '%s' "$manifest" | "$JQ_BIN" -r '.latestVersion')
   minimum=$(printf '%s' "$manifest" | "$JQ_BIN" -r '.minimumVersion')
-  valid_semver "$current" && valid_semver "$latest" && valid_semver "$minimum" || die "invalid version in release data"
+  valid_semver "$current" && valid_semver "$released" && valid_semver "$latest" && valid_semver "$minimum" || die "invalid version in release data"
+  integrity="unverified"
   if [[ "$(semver_cmp "$current" "$minimum")" -lt 0 ]]; then state="update_required"
   elif [[ "$(semver_cmp "$current" "$latest")" -lt 0 ]]; then state="update_available"
+  elif [[ "$current" == "$released" ]]; then
+    if verify_dir "$SKILL_ROOT" "$manifest"; then state="current"; integrity="verified"
+    else state="update_required"; integrity="drifted"; fi
   else state="current"; fi
-  "$JQ_BIN" -n --arg state "$state" --arg currentVersion "$current" --arg latestVersion "$latest" --arg minimumVersion "$minimum" --arg source "$OFFICIAL_SOURCE" \
-    '{state:$state,currentVersion:$currentVersion,latestVersion:$latestVersion,minimumVersion:$minimumVersion,source:$source}'
+  "$JQ_BIN" -n --arg state "$state" --arg integrity "$integrity" --arg currentVersion "$current" --arg latestVersion "$latest" --arg minimumVersion "$minimum" --arg source "$OFFICIAL_SOURCE" \
+    '{state:$state,integrity:$integrity,currentVersion:$currentVersion,latestVersion:$latestVersion,minimumVersion:$minimumVersion,source:$source}'
 }
 
 restore_install() {
@@ -119,16 +137,7 @@ restore_install() {
 }
 
 verify_install() {
-  local manifest="$1" expected_version actual_version path expected actual
-  expected_version=$(printf '%s' "$manifest" | "$JQ_BIN" -r '.version')
-  [[ -f "$INSTALL_DIR/SKILL.md" ]] || return 1
-  actual_version=$(sed -n 's/^\*\*Skill version: \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\*\*$/\1/p' "$INSTALL_DIR/SKILL.md" | head -1)
-  [[ "$actual_version" == "$expected_version" ]] || return 1
-  while IFS=$'\t' read -r path expected; do
-    [[ -n "$path" && -f "$INSTALL_DIR/$path" ]] || return 1
-    actual=$(shasum -a 256 "$INSTALL_DIR/$path" | awk '{print $1}')
-    [[ "$actual" == "$expected" ]] || return 1
-  done < <(printf '%s' "$manifest" | "$JQ_BIN" -r '.files[] | [.path,.sha256] | @tsv')
+  verify_dir "$INSTALL_DIR" "$1"
 }
 
 CMD="${1:-}"

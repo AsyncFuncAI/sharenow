@@ -19,6 +19,7 @@
 #   STUB_CURL_BODY_LOG if set, append one line per call: the -d/--data-binary body (for asserting payloads)
 #   STUB_CURL_ARGV_LOG if set, append every raw argument as a NUL-delimited field
 #                      (for asserting secrets and auth headers never leave the CLI)
+#   STUB_CURL_CONFIG_LOG if set, append curl config received on stdin
 #   STUB_CURL_DEVICE_START_BODY / STUB_CURL_DEVICE_TOKEN_BODY override the body
 #                      for the browser connection endpoints.
 #
@@ -38,6 +39,18 @@ fi
 if [[ -n "${STUB_CURL_ARGV_LOG:-}" ]]; then
   printf '%s\0' "$@" >> "$STUB_CURL_ARGV_LOG"
 fi
+
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--config" && "$arg" == "-" ]]; then
+    config_stdin="$(cat)"
+    if [[ -n "${STUB_CURL_CONFIG_LOG:-}" ]]; then
+      printf '%s\n' "$config_stdin" >> "$STUB_CURL_CONFIG_LOG"
+    fi
+    break
+  fi
+  prev="$arg"
+done
 
 # Parse just enough of the argv to know the output mode, the method, and the URL.
 out_file=""
@@ -123,6 +136,8 @@ esac
 
 if [[ "$data" == "@-" ]]; then
   data="$(cat)"
+elif [[ "$data" == @* && -f "${data#@}" ]]; then
+  data="$(cat "${data#@}")"
 fi
 # Aggregate short-flag clusters like -sS or -fsS that we did not special-case.
 for arg in "$@"; do

@@ -779,7 +779,7 @@ mkdir -p "$channel_home/.sharenow"
 printf '%s\n' 'snk_test_channel_12345678901234567890' > "$channel_home/.sharenow/credentials"
 chmod 600 "$channel_home/.sharenow/credentials"
 channel_create='{"channelId":"ch_launch123","sessionToken":"chsess_private123","claimToken":"clm_private123","memberId":"mem_owner123","channelUrl":"https://sharenow.today/ch/ch_launch123","overlordUrl":"https://sharenow.today/ch/ch_launch123#session=chsess_private123","joinUrl":"https://sharenow.today/api/v1/channels/ch_launch123/join"}'
-channel_out="$(env HOME="$channel_home" STUB_CURL_CHANNEL_CREATE_BODY="$channel_create" STUB_CURL_CHANNEL_CLAIM_BODY='{"success":true,"expiresAt":"2026-08-05T12:00:00.000Z"}' \
+channel_out="$(env HOME="$channel_home" STUB_CURL_ARGV_LOG="$WORK/channel-create-argv" STUB_CURL_CHANNEL_CREATE_BODY="$channel_create" STUB_CURL_CHANNEL_CLAIM_BODY='{"success":true,"expiresAt":"2026-08-05T12:00:00.000Z"}' \
   /bin/bash "$INSTALLED_CHANNEL_SCRIPT" create --title "Launch room")"
 assert_eq "Channel create returns a claimed non-secret receipt" "claimed" \
   "$(printf '%s' "$channel_out" | jq -r '.state')"
@@ -795,6 +795,46 @@ assert_eq "Channel create has no separate session field" "false" \
   "$(printf '%s' "$channel_out" | jq 'has("sessionToken")')"
 channel_mode=$(stat -f '%Lp' "$channel_home/.sharenow/channels.json" 2>/dev/null || stat -c '%a' "$channel_home/.sharenow/channels.json")
 assert_eq "Channel session state is mode 600" "600" "$channel_mode"
+TESTS_RUN=$((TESTS_RUN + 1))
+if tr '\0' '\n' < "$WORK/channel-create-argv" | grep -Eq 'chsess_private123|clm_private123'; then
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - Channel create capability appeared in a command argument"
+else
+  echo "ok $TESTS_RUN - Channel create capabilities never appear in command arguments"
+fi
+
+channel_state_tmp="$WORK/channel-state.json"
+jq '.channels.ch_launch123.members.FizzClaude={sessionToken:"chsess_claude123",memberId:"chm_claude123"}' \
+  "$channel_home/.sharenow/channels.json" > "$channel_state_tmp"
+mv "$channel_state_tmp" "$channel_home/.sharenow/channels.json"
+chmod 600 "$channel_home/.sharenow/channels.json"
+: > "$WORK/channel-command-argv"
+: > "$WORK/channel-command-config"
+: > "$WORK/channel-command-requests"
+channel_command_env=(env HOME="$channel_home" STUB_CURL_BODY='{}' STUB_CURL_ARGV_LOG="$WORK/channel-command-argv" STUB_CURL_CONFIG_LOG="$WORK/channel-command-config" STUB_CURL_LOG="$WORK/channel-command-requests")
+assert_run "Channel invite read command selects the saved agent identity" 0 '"messages"' -- \
+  "${channel_command_env[@]}" STUB_CURL_BODY='{"messages":[],"cursor":"cur_2"}' /bin/bash "$INSTALLED_CHANNEL_SCRIPT" read --as FizzClaude
+assert_run "Channel invite send command accepts positional text" 0 '{}' -- \
+  "${channel_command_env[@]}" /bin/bash "$INSTALLED_CHANNEL_SCRIPT" send --as FizzClaude "ready"
+assert_run "Channel legacy send syntax remains supported" 0 '{}' -- \
+  "${channel_command_env[@]}" /bin/bash "$INSTALLED_CHANNEL_SCRIPT" send ch_launch123 --as FizzClaude --text "legacy ready"
+assert_run "Channel task title may equal an action keyword" 0 '{}' -- \
+  "${channel_command_env[@]}" /bin/bash "$INSTALLED_CHANNEL_SCRIPT" task --as FizzClaude post claim
+assert_run "Channel task title may begin with the Channel id prefix" 0 '{}' -- \
+  "${channel_command_env[@]}" /bin/bash "$INSTALLED_CHANNEL_SCRIPT" task --as FizzClaude post ch_release
+assert_run "Channel shared-file path may equal an action keyword" 0 '{}' -- \
+  "${channel_command_env[@]}" /bin/bash "$INSTALLED_CHANNEL_SCRIPT" fs --as FizzClaude cat ls
+assert_run "Channel shared-file path may begin with the Channel id prefix" 0 '{}' -- \
+  "${channel_command_env[@]}" /bin/bash "$INSTALLED_CHANNEL_SCRIPT" fs --as FizzClaude cat ch_notes
+assert_eq "Channel selected identity is supplied through protected curl config" "7" \
+  "$(grep -c 'chsess_claude123' "$WORK/channel-command-config")"
+TESTS_RUN=$((TESTS_RUN + 1))
+if tr '\0' '\n' < "$WORK/channel-command-argv" | grep -q 'chsess_claude123'; then
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - Channel session appeared in a command argument"
+else
+  echo "ok $TESTS_RUN - Channel session never appears in a command argument"
+fi
 
 : > "$WORK/kb-dry-requests"
 assert_run "KB open dry-run accepts only an explicit public GitHub repository" 0 "public GitHub repository" -- \
@@ -981,12 +1021,12 @@ update_home="$(new_workdir)"
 mkdir -p "$update_home/.agents/skills/sharenow"
 printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$update_home/.agents/skills/sharenow/SKILL.md"
 skill_sha=$(shasum -a 256 "$REPO_ROOT/sharenow/SKILL.md" | awk '{print $1}')
-success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.16.0",latestVersion:"1.16.0",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
+success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.17.0",latestVersion:"1.17.0",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
 assert_run "verified skill update replaces the canonical install in place" 0 '"state": "current"' -- \
   env HOME="$update_home" STUB_CURL_BODY="$success_manifest" SHARENOW_NPX_BIN="$STUBS/npx" SHARENOW_NPX_SOURCE="$REPO_ROOT/sharenow" \
     /bin/bash "$VERSION_SCRIPT" update --yes
-assert_eq "verified update installs version 1.16.0" "yes" \
-  "$(grep -q 'Skill version: 1.16.0' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
+assert_eq "verified update installs version 1.17.0" "yes" \
+  "$(grep -q 'Skill version: 1.17.0' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
 # ==========================================================================
 # Summary

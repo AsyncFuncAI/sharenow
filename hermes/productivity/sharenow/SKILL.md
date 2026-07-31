@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.16.0**
+**Skill version: 1.17.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -198,6 +198,12 @@ the contract and remote manifest before deployment. A failed app is not
 claimed and is sent to cleanup. A live app is claimed to the connected account,
 the helper-created staging Drive is removed, and only a non-secret receipt is
 returned.
+
+The human can manage the live app at `https://sharenow.today/dashboard/fullstack`.
+That browser-only surface shows operational analytics, provides bounded read-only
+SQL browsing and export, and lets the owner replace or delete write-only
+environment values. Do not ask the dashboard to reveal a stored value. It cannot
+recover one; the owner rotates it by submitting a replacement.
 
 The `loop-crm` starter demonstrates an HTTP intake route, SQL loop state,
 private file reports, a background model task with retries, a scheduled
