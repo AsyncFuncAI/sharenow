@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.17.0**
+**Skill version: 1.17.1**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -32,6 +32,24 @@ For a project-local install, omit `-g`:
 ```bash
 npx skills add AsyncFuncAI/sharenow --skill sharenow
 ```
+
+## After installation
+
+Do not stop at "installed" or run setup again. Say `ShareNow is ready.` and
+ask `What would you like to publish?` If the user already named an exact file,
+folder, or finished result, continue with that request instead of asking again.
+
+When examples would help, offer no more than these three:
+
+- `Publish this website to sharenow.`
+- `Turn this result into a simple page and publish it to sharenow.`
+- `Summarize this session as a shareable page and publish it to sharenow.`
+
+If the current environment cannot run the bundled helpers, say so plainly. A
+browser-only agent that can make external HTTPS requests may use the public API
+at `https://sharenow.today/openapi.json`. If it cannot make those requests,
+tell the user to continue in Codex, Claude Code, Cursor, or another local agent
+with shell and external HTTPS access.
 
 ## Trust boundary
 
@@ -281,10 +299,3 @@ After publishing, return the live URL and whether it is permanent or expires in
 one hour. If it is temporary, offer one clear next step: open the private claim
 page, or connect the account and publish again. Do not include claim tokens, API
 keys, Drive tokens, or local state.
-
-When installation finishes, do not stop at "installed." Tell the user what to
-ask next. Good examples:
-
-- `Publish this website to sharenow.`
-- `Turn this result into a simple page and publish it to sharenow.`
-- `Summarize this session as a shareable page and publish it to sharenow.`
