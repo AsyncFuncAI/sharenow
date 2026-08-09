@@ -13,19 +13,24 @@ description: >
 
 # sharenow
 
-**Skill version: 1.17.1**
+**Skill version: 1.17.2**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
 
-Install or update globally:
+Install or update globally for the agent running this skill. Replace `<agent-id>`
+with the current skills CLI runtime id, such as `claude-code`, `codex`, or
+`cursor`:
 
 ```bash
-npx skills add AsyncFuncAI/sharenow --skill sharenow -g
+npx skills add AsyncFuncAI/sharenow --skill sharenow -g --agent <agent-id> -y
 ```
 
-Re-running that command updates the existing `sharenow` skill in place. Never
-create a second copy under another agent folder just to update it.
+Do not run the placeholder literally. Choose the id for the current agent, then
+run the completed command. Targeting one agent prevents the installer from
+checking unrelated runtimes that may not support global installation. Re-running
+the completed command updates the existing `sharenow` skill in place. Never create
+a second copy under another agent folder just to update it.
 
 For a project-local install, omit `-g`:
 

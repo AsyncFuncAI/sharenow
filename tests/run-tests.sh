@@ -656,6 +656,17 @@ assert_eq "parked channel helper is preserved" "yes" \
 assert_eq "parked KB helper is preserved" "yes" \
   "$([[ -f "$KB_SCRIPT" ]] && echo yes || echo no)"
 
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -Fq -- '--agent <agent-id> -y' "$REPO_ROOT/sharenow/SKILL.md" &&
+   grep -Fq 'claude-code' "$REPO_ROOT/sharenow/SKILL.md" &&
+   grep -Fq 'codex' "$REPO_ROOT/sharenow/SKILL.md" &&
+   grep -Fq 'cursor' "$REPO_ROOT/sharenow/SKILL.md"; then
+  echo "ok $TESTS_RUN - install guidance targets the current agent runtime"
+else
+  TESTS_FAIL=$((TESTS_FAIL + 1))
+  echo "not ok $TESTS_RUN - install guidance can trigger unrelated agent targets"
+fi
+
 unsafe_instruction_pattern='request-code|verify-code|paste (it|the code)|keys create|--api-key|--base-url|allow-nonsharenow-base-url'
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -REin "$unsafe_instruction_pattern" "$REPO_ROOT/sharenow" >/dev/null 2>&1; then
@@ -1021,12 +1032,12 @@ update_home="$(new_workdir)"
 mkdir -p "$update_home/.agents/skills/sharenow"
 printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$update_home/.agents/skills/sharenow/SKILL.md"
 skill_sha=$(shasum -a 256 "$REPO_ROOT/sharenow/SKILL.md" | awk '{print $1}')
-success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.17.1",latestVersion:"1.17.1",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
+success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.17.2",latestVersion:"1.17.2",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
 assert_run "verified skill update replaces the canonical install in place" 0 '"state": "current"' -- \
   env HOME="$update_home" STUB_CURL_BODY="$success_manifest" SHARENOW_NPX_BIN="$STUBS/npx" SHARENOW_NPX_SOURCE="$REPO_ROOT/sharenow" \
     /bin/bash "$VERSION_SCRIPT" update --yes
-assert_eq "verified update installs version 1.17.1" "yes" \
-  "$(grep -q 'Skill version: 1.17.1' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
+assert_eq "verified update installs version 1.17.2" "yes" \
+  "$(grep -q 'Skill version: 1.17.2' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
 # ==========================================================================
 # Summary

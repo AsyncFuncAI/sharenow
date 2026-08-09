@@ -72,15 +72,24 @@ at [sharenow.today/.well-known/sharenow-skill.json](https://sharenow.today/.well
 One skill, the same seven scripts, wherever your local agent runs. Re-run the
 same command later to update it in place.
 
-**Universal (recommended).** Anywhere the `skills` CLI runs:
+**Universal (recommended).** Use the command for the agent you are running:
 
 ```bash
-npx skills add AsyncFuncAI/sharenow --skill sharenow -g
+# Claude Code
+npx skills add AsyncFuncAI/sharenow --skill sharenow -g --agent claude-code -y
+
+# Codex
+npx skills add AsyncFuncAI/sharenow --skill sharenow -g --agent codex -y
+
+# Cursor
+npx skills add AsyncFuncAI/sharenow --skill sharenow -g --agent cursor -y
 ```
 
-Drop the `-g` for a project-local, repo-pinned install.
+For another runtime, replace the value after `--agent` with its skills agent id.
+Targeting the current agent avoids warnings from unrelated runtimes. Drop `-g`
+for a project-local, repo-pinned install.
 
-The installer discovers Codex, Claude Code, Cursor, OpenCode, and other common
+The installer supports Codex, Claude Code, Cursor, OpenCode, and other common
 local-agent skill folders. If your agent does not support local shell tools,
 such as a browser-only chat, ask it to use sharenow's public HTTP API instead.
 It can publish as long as it can call `curl` to an external service.
