@@ -974,6 +974,40 @@ assert_run "Fullstack approval is a separate local action" 0 '"approved": true' 
   env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" approve "$plan_id"
 printf '%s\n' '{"STRIPE_SECRET_KEY":"sk_test_example","ANTHROPIC_API_KEY":"sk-ant-test-example"}' > "$fullstack_wd/secrets.json"
 chmod 600 "$fullstack_wd/secrets.json"
+
+assert_run "Fullstack lists existing apps before choosing update or deploy" 0 '"appId": "fsa_existing123"' -- \
+  env HOME="$all_access_home" STUB_CURL_FULLSTACK_LIST_BODY='{"apps":[{"appId":"fsa_existing123","slug":"stable-app","state":"live","url":"https://stable-app.sharenow.today","claimed":true}]}' \
+    /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" list
+assert_run "Fullstack update refuses an approval not bound to an app" 1 "approval is not bound" -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" update fsa_existing123 "$plan_id" --secrets-from "$fullstack_wd/secrets.json" --dry-run
+assert_run "Fullstack approval can bind the exact plan to one existing app" 0 '"targetAppId": "fsa_existing123"' -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" approve "$plan_id" --for-app fsa_existing123
+assert_run "Fullstack deploy refuses a receipt bound for update" 1 "use fullstack.sh update" -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" deploy "$plan_id" --secrets-from "$fullstack_wd/secrets.json" --dry-run
+assert_run "Fullstack update refuses a different app id" 1 "different Fullstack app" -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" update fsa_other123 "$plan_id" --secrets-from "$fullstack_wd/secrets.json" --dry-run
+: > "$WORK/fullstack-update-dry-requests"
+assert_run "approved Fullstack update dry-run is local only" 0 '"action": "update"' -- \
+  env HOME="$all_access_home" STUB_CURL_LOG="$WORK/fullstack-update-dry-requests" \
+    /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" update fsa_existing123 "$plan_id" --secrets-from "$fullstack_wd/secrets.json" --dry-run
+assert_eq "Fullstack update dry-run makes no HTTP request" "0" \
+  "$(wc -l < "$WORK/fullstack-update-dry-requests" | tr -d '[:space:]')"
+: > "$WORK/fullstack-update-requests"
+update_out="$(env HOME="$all_access_home" STUB_CURL_LOG="$WORK/fullstack-update-requests" \
+  STUB_CURL_FULLSTACK_VALIDATE_BODY='{"valid":true,"files":1,"bytes":1200,"resources":["worker"],"requiredSecrets":["ANTHROPIC_API_KEY","STRIPE_SECRET_KEY"],"triggers":[]}' \
+  STUB_CURL_FULLSTACK_UPDATE_BODY='{"appId":"fsa_existing123","slug":"stable-app","url":"https://stable-app.sharenow.today","state":"live","updated":true}' \
+  /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" update fsa_existing123 "$plan_id" --secrets-from "$fullstack_wd/secrets.json")"
+assert_eq "Fullstack update keeps the same app id" "fsa_existing123" \
+  "$(printf '%s' "$update_out" | jq -r '.appId')"
+assert_eq "Fullstack update keeps the same live URL" "https://stable-app.sharenow.today" \
+  "$(printf '%s' "$update_out" | jq -r '.url')"
+assert_eq "Fullstack update sends one PUT to the existing app" "1" \
+  "$(grep -c $'PUT\thttps://sharenow.today/api/v1/fullstack/fsa_existing123$' "$WORK/fullstack-update-requests" | tr -d '[:space:]')"
+assert_eq "Fullstack update never creates a second app" "0" \
+  "$(grep -c $'POST\thttps://sharenow.today/api/v1/fullstack$' "$WORK/fullstack-update-requests" | tr -d '[:space:]' || true)"
+assert_run "Fullstack plan can be rebound for a later new deployment" 0 '"targetAppId": null' -- \
+  env HOME="$all_access_home" /bin/bash "$INSTALLED_FULLSTACK_SCRIPT" approve "$plan_id"
+
 : > "$WORK/fullstack-deploy-requests"
 assert_run "approved Fullstack dry-run validates without deploying" 0 '"dryRun": true' -- \
   env HOME="$all_access_home" STUB_CURL_LOG="$WORK/fullstack-deploy-requests" \
@@ -1032,12 +1066,12 @@ update_home="$(new_workdir)"
 mkdir -p "$update_home/.agents/skills/sharenow"
 printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$update_home/.agents/skills/sharenow/SKILL.md"
 skill_sha=$(shasum -a 256 "$REPO_ROOT/sharenow/SKILL.md" | awk '{print $1}')
-success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.17.2",latestVersion:"1.17.2",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
+success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.17.3",latestVersion:"1.17.3",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
 assert_run "verified skill update replaces the canonical install in place" 0 '"state": "current"' -- \
   env HOME="$update_home" STUB_CURL_BODY="$success_manifest" SHARENOW_NPX_BIN="$STUBS/npx" SHARENOW_NPX_SOURCE="$REPO_ROOT/sharenow" \
     /bin/bash "$VERSION_SCRIPT" update --yes
-assert_eq "verified update installs version 1.17.2" "yes" \
-  "$(grep -q 'Skill version: 1.17.2' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
+assert_eq "verified update installs version 1.17.3" "yes" \
+  "$(grep -q 'Skill version: 1.17.3' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
 # ==========================================================================
 # Summary

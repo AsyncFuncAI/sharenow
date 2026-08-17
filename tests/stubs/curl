@@ -110,8 +110,13 @@ case "$url" in
     status="${STUB_CURL_FULLSTACK_VALIDATE_STATUS:-$status}"
     ;;
   */api/v1/fullstack)
-    body="${STUB_CURL_FULLSTACK_CREATE_BODY:-$body}"
-    status="${STUB_CURL_FULLSTACK_CREATE_STATUS:-$status}"
+    if [[ "$method" == "GET" ]]; then
+      body="${STUB_CURL_FULLSTACK_LIST_BODY:-$body}"
+      status="${STUB_CURL_FULLSTACK_LIST_STATUS:-$status}"
+    else
+      body="${STUB_CURL_FULLSTACK_CREATE_BODY:-$body}"
+      status="${STUB_CURL_FULLSTACK_CREATE_STATUS:-$status}"
+    fi
     ;;
   */api/v1/fullstack/*/status)
     body="${STUB_CURL_FULLSTACK_STATUS_BODY:-$body}"
@@ -120,6 +125,10 @@ case "$url" in
   */api/v1/fullstack/*/claim)
     body="${STUB_CURL_FULLSTACK_CLAIM_BODY:-$body}"
     status="${STUB_CURL_FULLSTACK_CLAIM_STATUS:-$status}"
+    ;;
+  */api/v1/fullstack/*)
+    body="${STUB_CURL_FULLSTACK_UPDATE_BODY:-$body}"
+    status="${STUB_CURL_FULLSTACK_UPDATE_STATUS:-$status}"
     ;;
   https://*.sharenow.today|https://*.sharenow.today/)
     if [[ -n "${STUB_CURL_FULLSTACK_URL_STATUS_FILE:-}" && -f "$STUB_CURL_FULLSTACK_URL_STATUS_FILE" ]]; then
