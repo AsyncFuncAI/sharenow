@@ -18,8 +18,9 @@ Commands:
   prepare <project-folder> [--dry-run]
   plan --contract <yaml-file> --drive <drive-id> --manifest <json-file>
   validate <plan-id>
-  approve <plan-id>
+  approve <plan-id> [--for-app <app-id>]
   deploy <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
+  update <app-id> <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
   status <app-id>
   delete <app-id> --confirm <app-id> [--dry-run]
 
@@ -385,11 +386,21 @@ case "$CMD" in
     "$JQ_BIN" -n --arg planId "$plan_id" --argjson validation "$validation" '$validation + {planId:$planId,state:"validated",provisioned:false}'
     ;;
   approve)
-    [[ $# -eq 1 ]] || die "usage: fullstack.sh approve <plan-id>"
-    plan_id="$1"; receipt=$(read_receipt "$plan_id"); verify_receipt_content "$receipt"
-    approved=$($JQ_BIN -n --argjson receipt "$receipt" --arg approvedAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '$receipt + {approved:true,approvedAt:$approvedAt}')
+    [[ $# -ge 1 ]] || die "usage: fullstack.sh approve <plan-id> [--for-app <app-id>]"
+    plan_id="$1"; shift; target_app=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --for-app) [[ $# -ge 2 ]] || die "--for-app requires an app id"; target_app="$2"; shift 2 ;;
+        *) die "unexpected approve argument: $1" ;;
+      esac
+    done
+    [[ -z "$target_app" ]] || valid_app_id "$target_app"
+    receipt=$(read_receipt "$plan_id"); verify_receipt_content "$receipt"
+    approved=$($JQ_BIN -n --argjson receipt "$receipt" --arg approvedAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --arg targetAppId "$target_app" \
+      '$receipt + {approved:true,approvedAt:$approvedAt,targetAppId:(if $targetAppId == "" then null else $targetAppId end)}')
     write_receipt "$(receipt_path "$plan_id")" "$approved"
-    "$JQ_BIN" -n --arg planId "$plan_id" '{planId:$planId,approved:true,next:"Deploy this exact plan with fullstack.sh deploy <plan-id>."}'
+    "$JQ_BIN" -n --arg planId "$plan_id" --arg targetAppId "$target_app" \
+      '{planId:$planId,approved:true,targetAppId:(if $targetAppId == "" then null else $targetAppId end),next:(if $targetAppId == "" then ("Deploy this exact plan with fullstack.sh deploy " + $planId + ".") else ("Update " + $targetAppId + " with fullstack.sh update " + $targetAppId + " " + $planId + ".") end)}'
     ;;
   deploy)
     [[ $# -ge 1 ]] || die "usage: fullstack.sh deploy <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]"
@@ -403,6 +414,8 @@ case "$CMD" in
     done
     receipt=$(read_receipt "$plan_id")
     [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.approved')" == true ]] || die "Fullstack plan is not approved; review it and run fullstack.sh approve $plan_id"
+    target_app=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.targetAppId // empty')
+    [[ -z "$target_app" ]] || die "plan is approved for updating $target_app; use fullstack.sh update $target_app $plan_id"
     verify_receipt_content "$receipt"
     env_json='{}'
     if [[ -n "$secrets_file" ]]; then
@@ -462,6 +475,58 @@ case "$CMD" in
       + (if $addressState == "ready" then {url:$url}
          elif $addressState == "propagating" then {next:("The app is permanent. Its address is still finishing. Run fullstack.sh status " + $appId + " in a few seconds.")}
          else {} end)'
+    ;;
+  update)
+    [[ $# -ge 2 ]] || die "usage: fullstack.sh update <app-id> <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]"
+    app_id="$1"; plan_id="$2"; shift 2; secrets_file=""; dry=0
+    valid_app_id "$app_id"; valid_plan_id "$plan_id"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --secrets-from) [[ $# -ge 2 ]] || die "--secrets-from requires a file"; secrets_file="$2"; shift 2 ;;
+        --dry-run) dry=1; shift ;;
+        *) die "unexpected update argument: $1" ;;
+      esac
+    done
+    receipt=$(read_receipt "$plan_id")
+    [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.approved')" == true ]] || die "Fullstack plan is not approved; review it and run fullstack.sh approve $plan_id"
+    target_app=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.targetAppId // empty')
+    [[ -n "$target_app" ]] || die "plan approval is not bound to an app; run fullstack.sh approve $plan_id --for-app $app_id"
+    [[ "$target_app" == "$app_id" ]] || die "plan is approved for a different Fullstack app: $target_app"
+    verify_receipt_content "$receipt"
+    env_json='{}'
+    if [[ -n "$secrets_file" ]]; then
+      secrets_file=$(absolute_file "$secrets_file")
+      [[ "$(file_mode "$secrets_file")" == 600 ]] || die "secret file must have mode 600"
+      env_json=$($JQ_BIN -ce 'if type == "object" and all(to_entries[]; (.key|test("^[A-Z_][A-Z0-9_]*$")) and (.value|type=="string")) then . else error("invalid secret map") end' "$secrets_file" 2>/dev/null) || die "secret file must be a JSON object of string values"
+      declared=$(printf '%s' "$receipt" | "$JQ_BIN" -c '.declaredEnv')
+      provided=$(printf '%s' "$env_json" | "$JQ_BIN" -c 'keys | sort')
+      [[ "$provided" == "$declared" ]] || die "secret file keys must exactly match the contract env list"
+    else
+      [[ "$(printf '%s' "$receipt" | "$JQ_BIN" '.declaredEnv | length')" -eq 0 ]] || die "this contract requires --secrets-from with a mode-600 JSON file"
+    fi
+    if [[ "$dry" -eq 1 ]]; then
+      "$JQ_BIN" -n --arg appId "$app_id" --arg planId "$plan_id" '{dryRun:true,action:"update",appId:$appId,planId:$planId,approved:true,localContentVerified:true,remoteValidated:false,networkRequests:0,next:"Run update again without --dry-run to revalidate and update this existing app in place."}'
+      exit 0
+    fi
+    load_account_key
+    validation=$(remote_validate "$receipt" "$env_json")
+    contract_path=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.contractPath')
+    yaml=$(cat "$contract_path")
+    body=$($JQ_BIN -n --arg yaml "$yaml" --arg driveId "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')" --argjson manifest "$(printf '%s' "$receipt" | "$JQ_BIN" -c '.manifest')" --argjson env "$env_json" '{yaml:$yaml,driveId:$driveId,manifest:$manifest,env:$env}')
+    updated=$(api_account PUT "$BASE_URL/api/v1/fullstack/$app_id" "$body")
+    unset body env_json yaml validation
+    [[ "$(printf '%s' "$updated" | "$JQ_BIN" -r '.appId // empty')" == "$app_id" ]] || die "Fullstack update response changed the app id"
+    [[ "$(printf '%s' "$updated" | "$JQ_BIN" -r '.updated // false')" == true ]] || die "Fullstack update did not confirm success"
+    staging_drive="not_applicable"
+    if [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project ]]; then
+      drive_id=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')
+      if api_account DELETE "$BASE_URL/api/v1/drives/$drive_id" >/dev/null; then
+        staging_drive="removed"
+      else
+        staging_drive="retained"
+      fi
+    fi
+    printf '%s' "$updated" | "$JQ_BIN" --arg stagingDrive "$staging_drive" '. + {stagingDrive:$stagingDrive}'
     ;;
   status)
     [[ $# -eq 1 ]] || die "usage: fullstack.sh status <app-id>"

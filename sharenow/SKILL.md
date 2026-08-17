@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.17.2**
+**Skill version: 1.17.3**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -194,6 +194,9 @@ Run `./scripts/channel.sh --help` for messages and task commands.
 ## Lightweight Fullstack apps
 
 Fullstack turns one explicit project folder into an approved lightweight app.
+Before changing a Fullstack app, run `./scripts/fullstack.sh list` and identify
+the existing app by its `appId` and URL. If the request is an edit to that app,
+use `update`; do not create a replacement with `deploy`.
 For a working loop-driven example, initialize the reviewed starter:
 
 ```bash
@@ -207,7 +210,7 @@ stages the accepted files in a temporary private Drive, then asks sharenow to
 validate those exact remote bytes without provisioning. Summarize the returned
 file count, required secret names, resources, triggers, and behavior. Do not
 approve on the user's behalf. After explicit approval, use the separate deploy
-steps:
+steps for a new app:
 
 ```bash
 ./scripts/fullstack.sh approve <plan-id>
@@ -215,9 +218,28 @@ steps:
 ./scripts/fullstack.sh deploy <plan-id> --secrets-from ./secrets.json
 ```
 
+For an existing claimed live app, send the approved plan to that app instead:
+
+```bash
+./scripts/fullstack.sh approve <plan-id> --for-app <app-id>
+./scripts/fullstack.sh update <app-id> <plan-id> --dry-run
+./scripts/fullstack.sh update <app-id> <plan-id> --secrets-from ./secrets.json
+```
+
+An update keeps the app ID, live URL, and managed data resources. It can replace
+code, frontend files, secrets, and schedules, but it keeps the existing database
+schema, managed resource bindings, and Durable Object bindings. If that topology
+or schema must change, explain that a separately approved new app is required.
+Approval for an update is bound to the selected app ID. Never use `deploy` for
+that receipt or substitute a different app ID.
+For an app created before in-place updates were available, the server may ask
+you to omit `code.schema` because its original schema fingerprint is unavailable.
+Remove only that schema path and file, prepare a new plan, and leave the live
+database unchanged.
+
 The optional secrets file must be a mode-600 JSON object whose keys exactly
 match the contract `env:` list. Never print its values. The helper revalidates
-the contract and remote manifest before deployment. A failed app is not
+the contract and remote manifest before deployment or update. A failed new app is not
 claimed and is sent to cleanup. A live app is claimed to the connected account,
 the helper-created staging Drive is removed, and only a non-secret receipt is
 returned.
