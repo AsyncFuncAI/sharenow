@@ -1066,12 +1066,12 @@ update_home="$(new_workdir)"
 mkdir -p "$update_home/.agents/skills/sharenow"
 printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$update_home/.agents/skills/sharenow/SKILL.md"
 skill_sha=$(shasum -a 256 "$REPO_ROOT/sharenow/SKILL.md" | awk '{print $1}')
-success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.17.3",latestVersion:"1.17.3",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
+success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.18.0",latestVersion:"1.18.0",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
 assert_run "verified skill update replaces the canonical install in place" 0 '"state": "current"' -- \
   env HOME="$update_home" STUB_CURL_BODY="$success_manifest" SHARENOW_NPX_BIN="$STUBS/npx" SHARENOW_NPX_SOURCE="$REPO_ROOT/sharenow" \
     /bin/bash "$VERSION_SCRIPT" update --yes
-assert_eq "verified update installs version 1.17.3" "yes" \
-  "$(grep -q 'Skill version: 1.17.3' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
+assert_eq "verified update installs version 1.18.0" "yes" \
+  "$(grep -q 'Skill version: 1.18.0' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
 # ==========================================================================
 # Summary

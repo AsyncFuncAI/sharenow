@@ -332,35 +332,52 @@ else
 fi
 upload_errors=0
 
-for ((i = 0; i < UPLOAD_COUNT; i++)); do
-  upload_path=$(echo "$RESPONSE" | "$JQ_BIN" -r ".upload.uploads[$i].path")
-  upload_url=$(echo "$RESPONSE" | "$JQ_BIN" -r ".upload.uploads[$i].url")
-  upload_ct=$(echo "$RESPONSE" | "$JQ_BIN" -r ".upload.uploads[$i].headers[\"Content-Type\"] // empty")
+# Uploads run in parallel (8 at a time): each PUT is independent, and serial
+# uploads were the slowest phase of multi-file publishes by far. Failures are
+# collected in a temp file because each upload runs in a background subshell.
+if [[ "$UPLOAD_COUNT" -gt 0 ]]; then
+  UPLOAD_TMP=$(mktemp -d "${TMPDIR:-/tmp}/sharenow-upload.XXXXXX")
+  # One jq pass over the response instead of three per file.
+  UPLOAD_LIST=$(echo "$RESPONSE" | "$JQ_BIN" -r '.upload.uploads[] | [.path, .url, (.headers["Content-Type"] // "")] | @tsv')
+  active=0
+  while IFS=$'\t' read -r upload_path upload_url upload_ct; do
+    [[ -n "$upload_path" ]] || continue
 
-  if [[ -f "$TARGET" && ! -d "$TARGET" ]]; then
-    local_file="$TARGET"
-  else
-    local_file=$(echo "$FILE_MAP" | "$JQ_BIN" -r --arg p "$upload_path" '.[$p]')
+    if [[ -f "$TARGET" && ! -d "$TARGET" ]]; then
+      local_file="$TARGET"
+    else
+      local_file=$(echo "$FILE_MAP" | "$JQ_BIN" -r --arg p "$upload_path" '.[$p]')
+    fi
+
+    if [[ ! -f "$local_file" ]]; then
+      echo "warning: missing local file for $upload_path" >&2
+      upload_errors=$((upload_errors + 1))
+      continue
+    fi
+
+    (
+      ct_args=()
+      [[ -n "$upload_ct" ]] && ct_args=(-H "Content-Type: $upload_ct")
+      http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT "$upload_url" \
+        "${ct_args[@]+"${ct_args[@]}"}" \
+        --data-binary "@$local_file") || true
+      if [[ -z "$http_code" || "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+        echo "warning: upload failed for $upload_path (HTTP ${http_code:-000})" >&2
+        printf '%s\n' "$upload_path" >>"$UPLOAD_TMP/failures"
+      fi
+    ) &
+    active=$((active + 1))
+    if [[ "$active" -ge 8 ]]; then
+      wait
+      active=0
+    fi
+  done <<<"$UPLOAD_LIST"
+  wait
+  if [[ -s "$UPLOAD_TMP/failures" ]]; then
+    upload_errors=$((upload_errors + $(wc -l <"$UPLOAD_TMP/failures")))
   fi
-
-  if [[ ! -f "$local_file" ]]; then
-    echo "warning: missing local file for $upload_path" >&2
-    upload_errors=$((upload_errors + 1))
-    continue
-  fi
-
-  ct_args=()
-  [[ -n "$upload_ct" ]] && ct_args=(-H "Content-Type: $upload_ct")
-
-  http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT "$upload_url" \
-    "${ct_args[@]+"${ct_args[@]}"}" \
-    --data-binary "@$local_file")
-
-  if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-    echo "warning: upload failed for $upload_path (HTTP $http_code)" >&2
-    upload_errors=$((upload_errors + 1))
-  fi
-done
+  rm -rf "$UPLOAD_TMP"
+fi
 
 [[ "$upload_errors" -eq 0 ]] || die "$upload_errors file(s) failed to upload"
 
