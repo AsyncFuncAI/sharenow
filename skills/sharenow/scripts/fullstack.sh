@@ -22,6 +22,7 @@ Commands:
   deploy <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
   update <app-id> <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
   status <app-id>
+  rename <app-id> <new-slug>
   delete <app-id> --confirm <app-id> [--dry-run]
 
 Prepare scans one explicit project folder. Its dry-run is local. The live path
@@ -531,6 +532,11 @@ case "$CMD" in
   status)
     [[ $# -eq 1 ]] || die "usage: fullstack.sh status <app-id>"
     valid_app_id "$1"; load_account_key; api_account GET "$BASE_URL/api/v1/fullstack/$1/status" | "$JQ_BIN" .
+    ;;
+  rename)
+    [[ $# -eq 2 ]] || die "usage: fullstack.sh rename <app-id> <new-slug>"
+    valid_app_id "$1"; load_account_key
+    api_account POST "$BASE_URL/api/v1/fullstack/$1/rename" "$("$JQ_BIN" -cn --arg s "$2" '{slug:$s}')" | "$JQ_BIN" .
     ;;
   delete)
     [[ $# -ge 1 ]] || die "usage: fullstack.sh delete <app-id> --confirm <app-id> [--dry-run]"

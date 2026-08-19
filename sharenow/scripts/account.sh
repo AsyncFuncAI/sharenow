@@ -26,6 +26,7 @@ Connection:
 Sites:
   sites                                  List your Sites
   search <query> [--limit N] [--cursor C]
+  rename <slug> <new-slug>               Rename a Site's address (All Access); the old address redirects
 
 Site Data:
   site-data ls <slug> <collection> [--limit N] [--cursor C]
@@ -357,6 +358,13 @@ case "$CMD" in
     [[ -n "$limit" ]] && url="$url&limit=$limit"
     [[ -n "$cursor" ]] && url="$url&cursor=$(urlenc "$cursor")"
     $req GET "$url" | pp ;;
+
+  rename)
+    slug="${1:-}"; new="${2:-}"
+    [[ -n "$slug" && -n "$new" ]] || die "rename requires <slug> <new-slug>"
+    shift 2 || true
+    [[ $# -eq 0 ]] || die "unknown option: $1"
+    api_json POST "$BASE_URL/api/v1/publish/$(urlenc "$slug")/rename" "$(jobj --arg s "$new" '{slug:$s}')" | pp ;;
 
   site-data)
     sub="${1:-}"; shift || true

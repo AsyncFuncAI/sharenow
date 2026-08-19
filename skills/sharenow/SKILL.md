@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.18.0**
+**Skill version: 1.19.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -89,7 +89,7 @@ with shell and external HTTPS access.
 
 ## Publish a Site
 
-Sites live at `https://{slug}.sharenow.today` or a connected custom domain. The
+Sites live at `https://{slug}.__SHARENOW_SITE__` or a connected custom domain. The
 first stdout line from the helper is the exact live URL.
 
 The helper lives next to this file:
@@ -300,7 +300,8 @@ second skill copy.
 ## Account-only tools
 
 For Site lists, analytics, Site Data, profiles, domains, handles, links, access
-settings, and revoking keys, use only the relevant subcommand shown by:
+settings, renaming a Site's address, and revoking keys, use only the relevant
+subcommand shown by:
 
 ```bash
 ./scripts/account.sh --help
@@ -308,6 +309,12 @@ settings, and revoking keys, use only the relevant subcommand shown by:
 
 Do not run account inventory commands as part of installation or a simple
 publish request.
+
+When the user wants a Site at a name they chose (for example `grokbotfeed`
+instead of a generated slug), run `./scripts/account.sh rename <slug>
+<new-slug>`; for a claimed Fullstack app, `./scripts/fullstack.sh rename
+<app-id> <new-slug>`. Both require All Access. The old address keeps
+redirecting to the new one, so previously shared links continue to work.
 
 ## Local requirements
 
