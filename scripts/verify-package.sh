@@ -166,6 +166,19 @@ else
   fail "loop CRM starter runtime tests failed"
 fi
 
+echo "[11] deployment sentinels fully rendered"
+# The canonical tree is RENDERED (sentinels substituted). A leftover
+# __SHARENOW_*__ means an incomplete release render: the served manifest's file
+# hashes will not match GitHub and version.sh's verified update will refuse the
+# release. (This exact miss shipped once in v1.19.0: SKILL.md carries BOTH
+# __SHARENOW_BASE__ and __SHARENOW_SITE__.)
+sentinel_hits=$(grep -rEl '__SHARENOW_[A-Z_]+__' sharenow/ 2>/dev/null || true)
+if [[ -z "$sentinel_hits" ]]; then
+  pass "no unsubstituted __SHARENOW_*__ sentinels in the canonical tree"
+else
+  fail "unsubstituted deployment sentinels remain in: $(echo "$sentinel_hits" | tr '\n' ' ')"
+fi
+
 # --- Summary ----------------------------------------------------------------
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
