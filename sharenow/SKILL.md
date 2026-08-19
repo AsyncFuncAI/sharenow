@@ -89,7 +89,7 @@ with shell and external HTTPS access.
 
 ## Publish a Site
 
-Sites live at `https://{slug}.__SHARENOW_SITE__` or a connected custom domain. The
+Sites live at `https://{slug}.sharenow.today` or a connected custom domain. The
 first stdout line from the helper is the exact live URL.
 
 The helper lives next to this file:
