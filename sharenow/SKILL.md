@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.19.0**
+**Skill version: 1.20.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -227,15 +227,64 @@ For an existing claimed live app, send the approved plan to that app instead:
 ```
 
 An update keeps the app ID, live URL, and managed data resources. It can replace
-code, frontend files, secrets, and schedules, but it keeps the existing database
-schema, managed resource bindings, and Durable Object bindings. If that topology
-or schema must change, explain that a separately approved new app is required.
+code, frontend files, secrets, and schedules, and it keeps the managed resource
+bindings and Durable Object bindings. If that topology must change, explain
+that a separately approved new app is required.
 Approval for an update is bound to the selected app ID. Never use `deploy` for
 that receipt or substitute a different app ID.
-For an app created before in-place updates were available, the server may ask
-you to omit `code.schema` because its original schema fingerprint is unavailable.
-Remove only that schema path and file, prepare a new plan, and leave the live
-database unchanged.
+
+When the user has already approved shipping a specific project, `ship` chains
+prepare, approve, and deploy (or update with `--app`) in one command:
+
+```bash
+./scripts/fullstack.sh ship ./loopdesk
+./scripts/fullstack.sh ship ./loopdesk --app <app-id> --secrets-from ./secrets.json
+```
+
+### Evolving the database schema (migrations)
+
+`schema.sql` always describes a FRESH database: the complete current shape.
+To change a live app's schema, add a migration file next to it and update both:
+
+```
+loopdesk/
+  fullstack.yaml
+  worker.js
+  schema.sql                      <- edit to the new complete shape
+  migrations/0001_add_likes.sql   <- ALTER TABLE ... ADD COLUMN likes INTEGER ...
+```
+
+Migration files are named `migrations/NNNN_name.sql` (leading digits set the
+order; zero-pad them). On `update`, sharenow applies only the not-yet-applied
+files, in order, to the existing database before swapping the code, and records
+each one in a `_sharenow_migrations` ledger inside the app's own database. On a
+fresh `deploy`, `schema.sql` is applied and every staged migration is recorded
+as already reflected. Never edit an applied migration file; write a new one.
+An update that changes `schema.sql` without staging a migration is rejected.
+
+### Reading data and logs
+
+`sql` runs one read-only SELECT against the app's database with no app route
+required, and `logs` captures live Worker events (requests, console output,
+exceptions) for a bounded window - start it in the background, exercise the
+app, then read the result:
+
+```bash
+./scripts/fullstack.sh sql <app-id> "SELECT id, status FROM leads ORDER BY id DESC LIMIT 20"
+./scripts/fullstack.sh logs <app-id> --seconds 30 &
+curl -s https://{slug}.sharenow.today/api/intake -X POST -d '{"probe":true}'
+wait
+```
+
+### Runtime behavior on the branded host
+
+The branded `https://{slug}.sharenow.today` host serves your Worker's own
+response headers and supports every HTTP method and WebSockets - same app, one
+policy. Two things to know: inside the Worker, `request.url` carries the
+workers.dev host (routing requires it), so read the `x-forwarded-host` request
+header when you need your public hostname; and responses without a
+`Cache-Control` header are served with `no-store`, so fresh deploys show up
+immediately - set your own `Cache-Control` if you want caching.
 
 The optional secrets file must be a mode-600 JSON object whose keys exactly
 match the contract `env:` list. Never print its values. The helper revalidates

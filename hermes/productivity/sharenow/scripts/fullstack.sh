@@ -21,15 +21,24 @@ Commands:
   approve <plan-id> [--for-app <app-id>]
   deploy <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
   update <app-id> <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
+  ship <project-folder> [--app <app-id>] [--secrets-from <mode-600-json-file>]
   status <app-id>
+  sql <app-id> <select-statement> [--binding <name>]
+  logs <app-id> [--seconds <5-60>]
   rename <app-id> <new-slug>
   delete <app-id> --confirm <app-id> [--dry-run]
 
 Prepare scans one explicit project folder. Its dry-run is local. The live path
 stages accepted files in one private Drive and validates the exact remote bytes
 without provisioning. Deploy requires a separate approve command and repeats
-remote validation. Secret values are accepted only from a mode-600 JSON file,
-never from command-line values, and are never printed.
+remote validation. Ship chains prepare + approve + deploy (or update with
+--app) in one command - run it only when your user has already approved
+shipping this exact project. Secret values are accepted only from a mode-600
+JSON file, never from command-line values, and are never printed.
+
+sql runs one read-only SELECT against the app's D1 (no app route needed).
+logs captures LIVE Worker events for a bounded window: start it (in the
+background), then exercise the app, then read the result.
 USAGE
   exit "$code"
 }
@@ -529,9 +538,75 @@ case "$CMD" in
     fi
     printf '%s' "$updated" | "$JQ_BIN" --arg stagingDrive "$staging_drive" '. + {stagingDrive:$stagingDrive}'
     ;;
+  ship)
+    [[ $# -ge 1 ]] || die "usage: fullstack.sh ship <project-folder> [--app <app-id>] [--secrets-from <mode-600-json-file>]"
+    project="$1"; shift; target_app=""; secrets_file=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --app) [[ $# -ge 2 ]] || die "--app requires an app id"; target_app="$2"; shift 2 ;;
+        --secrets-from) [[ $# -ge 2 ]] || die "--secrets-from requires a file"; secrets_file="$2"; shift 2 ;;
+        *) die "unexpected ship argument: $1" ;;
+      esac
+    done
+    [[ -z "$target_app" ]] || valid_app_id "$target_app"
+    project=$(absolute_dir "$project")
+    prepared=$("$0" prepare "$project") || die "ship failed at prepare"
+    ship_plan_id=$(printf '%s' "$prepared" | "$JQ_BIN" -r '.planId // empty')
+    valid_plan_id "$ship_plan_id"
+    if [[ -n "$target_app" ]]; then
+      "$0" approve "$ship_plan_id" --for-app "$target_app" >/dev/null || die "ship failed at approve"
+    else
+      "$0" approve "$ship_plan_id" >/dev/null || die "ship failed at approve"
+    fi
+    ship_args=()
+    [[ -z "$secrets_file" ]] || ship_args=(--secrets-from "$secrets_file")
+    if [[ -n "$target_app" ]]; then
+      "$0" update "$target_app" "$ship_plan_id" ${ship_args[@]+"${ship_args[@]}"}
+    else
+      "$0" deploy "$ship_plan_id" ${ship_args[@]+"${ship_args[@]}"}
+    fi
+    ;;
   status)
     [[ $# -eq 1 ]] || die "usage: fullstack.sh status <app-id>"
     valid_app_id "$1"; load_account_key; api_account GET "$BASE_URL/api/v1/fullstack/$1/status" | "$JQ_BIN" .
+    ;;
+  sql)
+    [[ $# -ge 2 ]] || die "usage: fullstack.sh sql <app-id> <select-statement> [--binding <name>]"
+    app_id="$1"; sql_text="$2"; shift 2; binding=""
+    valid_app_id "$app_id"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --binding) [[ $# -ge 2 ]] || die "--binding requires a name"; binding="$2"; shift 2 ;;
+        *) die "unexpected sql argument: $1" ;;
+      esac
+    done
+    load_account_key
+    if [[ -n "$binding" ]]; then
+      body=$("$JQ_BIN" -cn --arg sql "$sql_text" --arg binding "$binding" '{sql:$sql,binding:$binding}')
+    else
+      body=$("$JQ_BIN" -cn --arg sql "$sql_text" '{sql:$sql}')
+    fi
+    api_account POST "$BASE_URL/api/v1/fullstack/$app_id/sql" "$body" | "$JQ_BIN" .
+    ;;
+  logs)
+    [[ $# -ge 1 ]] || die "usage: fullstack.sh logs <app-id> [--seconds <5-60>]"
+    app_id="$1"; shift; seconds=""
+    valid_app_id "$app_id"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --seconds) [[ $# -ge 2 ]] || die "--seconds requires a number"; seconds="$2"; shift 2 ;;
+        *) die "unexpected logs argument: $1" ;;
+      esac
+    done
+    load_account_key
+    if [[ -n "$seconds" ]]; then
+      [[ "$seconds" != *[!0-9]* && -n "$seconds" ]] || die "--seconds must be a whole number between 5 and 60"
+      body=$("$JQ_BIN" -cn --argjson seconds "$seconds" '{seconds:$seconds}')
+    else
+      body='{}'
+    fi
+    echo "capturing live Worker events (exercise the app now)..." >&2
+    api_account POST "$BASE_URL/api/v1/fullstack/$app_id/logs" "$body" | "$JQ_BIN" .
     ;;
   rename)
     [[ $# -eq 2 ]] || die "usage: fullstack.sh rename <app-id> <new-slug>"
