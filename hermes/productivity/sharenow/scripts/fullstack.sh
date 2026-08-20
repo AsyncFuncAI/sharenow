@@ -225,10 +225,10 @@ project_manifest() {
     [[ "$rel" != *$'\n'* && "$rel" != /* && "$rel" != *../* && "$rel" != ../* ]] || die "unsafe project path: $rel"
     is_sensitive_path "$rel" && die "sensitive file refused: $rel"
     size=$(wc -c < "$file_path" | tr -d '[:space:]')
-    [[ "$size" -le 2097152 ]] || die "project file exceeds 2 MiB: $rel"
+    [[ "$size" -le 20971520 ]] || die "project file exceeds 20 MiB: $rel"
     count=$((count + 1)); total=$((total + size))
-    [[ "$count" -le 200 ]] || die "project exceeds 200 files"
-    [[ "$total" -le 10485760 ]] || die "project exceeds 10 MiB"
+    [[ "$count" -le 500 ]] || die "project exceeds 500 files"
+    [[ "$total" -le 52428800 ]] || die "project exceeds 50 MiB"
     sha=$(file_sha "$file_path")
     manifest=$(printf '%s' "$manifest" | "$JQ_BIN" -c --arg path "$rel" --arg sha "$sha" --argjson size "$size" '. + [{path:$path,sha256:$sha,size:$size}]')
   done < <(find "$root" -type f -print0 | sort -z)

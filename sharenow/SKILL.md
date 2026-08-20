@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.20.1**
+**Skill version: 1.21.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -293,15 +293,46 @@ referrer, and any Referrer-Policy YOUR pages or Worker set is what serves.
 Embed players directly; proxy routes pointed at the raw workers.dev origin are
 no longer needed for playback.
 
-### Bundle limits (unchanged in v1.20)
+### Multi-file SPA and static assets
 
-A project bundle is capped at 200 files, 2 MiB per file, 10 MiB total, and a
-64 KiB `fullstack.yaml`. The frontend contract is one HTML file via
-`code.client`; a built multi-file SPA bundle is not supported yet. Extra
-`code.files` entries ship as ES modules the Worker can import - they are NOT
-served as static assets, so serving extra JS/CSS bytes through a small Worker
-route (import the module, return its exported string) remains the supported
-pattern.
+Declare `code.assets: <folder>` to ship a real built frontend (a Vite/other
+`dist/` output) as edge-served static assets - no Worker route per file:
+
+```yaml
+code:
+  worker: worker.js
+  schema: schema.sql
+  assets: web
+  spa: true
+```
+
+Every staged file under `web/` serves at the site root with the prefix
+stripped (`web/assets/app-abc1.js` -> `/assets/app-abc1.js`), with the right
+content type by extension. Assets are matched before the Worker; every
+unmatched path invokes the Worker, so `/api/...` routes work unchanged.
+Inside the Worker, `env.ASSETS.fetch(request)` serves from the same asset set
+(the name `ASSETS` is reserved). Unchanged assets are deduplicated between
+updates, so an asset-only redeploy is fast.
+
+For client-side routing (`spa: true` requires `web/index.html`), deep links
+must serve the shell. Because the Worker receives every non-asset path, end
+your fetch handler with this fallback (verified pattern):
+
+```js
+if (url.pathname.startsWith("/api/")) return jsonNotFound();
+if (request.method === "GET" || request.method === "HEAD") {
+  return env.ASSETS.fetch(new Request(new URL("/index.html", url.origin), { headers: request.headers }));
+}
+```
+
+### Bundle limits
+
+Assets: up to 300 files, 20 MiB per file, 40 MiB per bundle. Script files
+(`code.worker`, `code.schema`, `code.client`, `code.files`) stay at 2 MiB per
+file and 10 MiB total; `fullstack.yaml` at 64 KiB; a staged project at 500
+files / 50 MiB overall. `code.client` remains a single HTML file; `code.files`
+entries ship as ES modules the Worker imports, not as served assets - use
+`code.assets` for anything a browser should fetch directly.
 
 The optional secrets file must be a mode-600 JSON object whose keys exactly
 match the contract `env:` list. Never print its values. The helper revalidates
