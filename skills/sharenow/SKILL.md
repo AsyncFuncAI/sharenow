@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.20.0**
+**Skill version: 1.20.1**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -285,6 +285,23 @@ workers.dev host (routing requires it), so read the `x-forwarded-host` request
 header when you need your public hostname; and responses without a
 `Cache-Control` header are served with `no-store`, so fresh deploys show up
 immediately - set your own `Cache-Control` if you want caching.
+
+Third-party embeds that require a referrer (the YouTube "Error 153" /
+"Video unavailable" class, and X video players) work on the branded host: no
+platform Referrer-Policy is forced anymore, so browsers send their default
+referrer, and any Referrer-Policy YOUR pages or Worker set is what serves.
+Embed players directly; proxy routes pointed at the raw workers.dev origin are
+no longer needed for playback.
+
+### Bundle limits (unchanged in v1.20)
+
+A project bundle is capped at 200 files, 2 MiB per file, 10 MiB total, and a
+64 KiB `fullstack.yaml`. The frontend contract is one HTML file via
+`code.client`; a built multi-file SPA bundle is not supported yet. Extra
+`code.files` entries ship as ES modules the Worker can import - they are NOT
+served as static assets, so serving extra JS/CSS bytes through a small Worker
+route (import the module, return its exported string) remains the supported
+pattern.
 
 The optional secrets file must be a mode-600 JSON object whose keys exactly
 match the contract `env:` list. Never print its values. The helper revalidates
