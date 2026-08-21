@@ -40,7 +40,10 @@ JSON file, never from command-line values, and are never printed.
 
 sql runs one read-only SELECT against the app's D1 (no app route needed).
 logs captures LIVE Worker events for a bounded window: start it (in the
-background), then exercise the app, then read the result.
+background), then exercise the app, then read the result. For a
+`runtime: container` app the response ALSO carries `container.lines` - the
+app's persisted stdout/stderr from the last 15 minutes (boot output and
+crash messages included), no exercising required.
 
 push builds the image a `runtime: container` contract pins. The default lane
 uses local Docker; --assemble needs no Docker anywhere (prebuilt artifacts are

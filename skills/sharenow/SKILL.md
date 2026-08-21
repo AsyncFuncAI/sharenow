@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.23.0**
+**Skill version: 1.24.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -389,10 +389,13 @@ in-flight work resumable. Managed bindings (d1/r2/kv/queues) and triggers are
 worker-runtime features; container apps bring their own persistence and
 scheduling. Env values arrive as real environment variables (file-shaped
 secrets like SSH keys ride as a base64 env var your entrypoint writes to a
-file). `sql` does not apply; `logs` shows request events at the platform edge,
-not container stdout. An idle container scales to zero; the next request
-boots it again (seconds for a small image). `ship` waits up to ~90s for a
-container app's first response before reporting the address as ready.
+file). `sql` does not apply. `logs` returns the edge request events PLUS
+`container.lines`: the app's persisted stdout/stderr from the last 15
+minutes - boot output and crash messages included - so a container that
+fails to start can be debugged without local Docker. An idle container
+scales to zero; the next request boots it again (seconds for a small
+image). `ship` waits up to ~90s for a container app's first response
+before reporting the address as ready.
 
 ### Bundle limits
 
