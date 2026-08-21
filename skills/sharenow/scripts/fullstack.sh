@@ -22,6 +22,8 @@ Commands:
   deploy <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
   update <app-id> <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
   ship <project-folder> [--app <app-id>] [--secrets-from <mode-600-json-file>]
+  push <folder> [--dockerfile <file>] [--name <image-name>]
+  push --assemble --name <n> --base <ref> --entrypoint </path> --artifact <local>:<dest>[:<mode>]... [--env K=V]...
   status <app-id>
   sql <app-id> <select-statement> [--binding <name>]
   logs <app-id> [--seconds <5-60>]
@@ -39,6 +41,11 @@ JSON file, never from command-line values, and are never printed.
 sql runs one read-only SELECT against the app's D1 (no app route needed).
 logs captures LIVE Worker events for a bounded window: start it (in the
 background), then exercise the app, then read the result.
+
+push builds the image a `runtime: container` contract pins. The default lane
+uses local Docker; --assemble needs no Docker anywhere (prebuilt artifacts are
+assembled server-side onto a base image). Both print the digest reference and
+write it into the folder's fullstack.yaml when one declares runtime: container.
 USAGE
   exit "$code"
 }
@@ -537,6 +544,83 @@ case "$CMD" in
       fi
     fi
     printf '%s' "$updated" | "$JQ_BIN" --arg stagingDrive "$staging_drive" '. + {stagingDrive:$stagingDrive}'
+    ;;
+  push)
+    # Build + push a container image for `runtime: container` contracts.
+    # Lane 1 (default): local Docker builds the Dockerfile and pushes with
+    # short-lived registry credentials. Lane 2 (--assemble): no Docker needed -
+    # prebuilt artifacts are staged and assembled server-side.
+    assemble=0; folder=""; dockerfile="Dockerfile"; img_name=""; base=""; entrypoint=""; envs='[]'; artifacts='[]'
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --assemble) assemble=1; shift ;;
+        --dockerfile) [[ $# -ge 2 ]] || die "--dockerfile requires a file"; dockerfile="$2"; shift 2 ;;
+        --name) [[ $# -ge 2 ]] || die "--name requires a name"; img_name="$2"; shift 2 ;;
+        --base) [[ $# -ge 2 ]] || die "--base requires an image ref"; base="$2"; shift 2 ;;
+        --entrypoint) [[ $# -ge 2 ]] || die "--entrypoint requires a path"; entrypoint="$2"; shift 2 ;;
+        --env) [[ $# -ge 2 ]] || die "--env requires KEY=VALUE"; envs=$(printf '%s' "$envs" | "$JQ_BIN" -c --arg e "$2" '. + [$e]'); shift 2 ;;
+        --artifact) [[ $# -ge 2 ]] || die "--artifact requires local:dest[:mode]"; artifacts=$(printf '%s' "$artifacts" | "$JQ_BIN" -c --arg a "$2" '. + [$a]'); shift 2 ;;
+        -*) die "unexpected push argument: $1" ;;
+        *) folder="$1"; shift ;;
+      esac
+    done
+    load_account_key
+    [[ -n "$img_name" ]] || { [[ -n "$folder" ]] && img_name=$(basename "$folder" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-*//;s/-*$//' | cut -c1-40); }
+    [[ "$img_name" == [a-z0-9]* && "$img_name" != *[!a-z0-9-]* ]] || die "image name must be lowercase [a-z0-9-]; pass --name"
+    if [[ "$assemble" -eq 0 ]]; then
+      [[ -n "$folder" ]] || die "usage: fullstack.sh push <folder> [--dockerfile F] [--name n]  (or push --assemble ...)"
+      folder=$(absolute_dir "$folder")
+      command -v docker >/dev/null 2>&1 || die "push needs local Docker (or use push --assemble for the no-Docker lane)"
+      docker info >/dev/null 2>&1 || die "the Docker daemon is not running (or use push --assemble)"
+      creds=$(api_account POST "$BASE_URL/api/v1/fullstack/registry-auth" '{}')
+      reg_host=$(printf '%s' "$creds" | "$JQ_BIN" -r '.registryHost'); reg_user=$(printf '%s' "$creds" | "$JQ_BIN" -r '.username')
+      repo_prefix=$(printf '%s' "$creds" | "$JQ_BIN" -r '.repositoryPrefix')
+      repo="${repo_prefix}${img_name}"
+      printf '%s' "$creds" | "$JQ_BIN" -r '.password' | docker login "$reg_host" --username "$reg_user" --password-stdin >/dev/null 2>&1 || die "registry login failed"
+      docker build --platform linux/amd64 -f "$folder/$dockerfile" -t "$repo:sharenow" "$folder" >&2 || die "docker build failed"
+      docker push "$repo:sharenow" >&2 || die "docker push failed"
+      # Select the RepoDigest for THIS repo (RepoDigests[0] may be a base
+      # image's index digest, not the CF-registry manifest we just pushed).
+      image_ref=$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "$repo:sharenow" 2>/dev/null | grep -E "^${repo}@sha256:[0-9a-f]{64}$" | head -1)
+      [[ -n "$image_ref" ]] || die "could not read the pushed image digest for $repo"
+    else
+      [[ -n "$base" && -n "$entrypoint" ]] || die "push --assemble requires --base and --entrypoint"
+      [[ "$(printf '%s' "$artifacts" | "$JQ_BIN" 'length')" -gt 0 ]] || die "push --assemble requires at least one --artifact local:dest[:mode]"
+      drive_response=$(api_account POST "$BASE_URL/api/v1/drives" "$("$JQ_BIN" -n --arg name "Image staging $img_name" '{name:$name,isDefault:false}')")
+      drive_id=$(printf '%s' "$drive_response" | "$JQ_BIN" -r '.drive.id // .id // empty')
+      [[ "$drive_id" == drv_* ]] || die "invalid Drive create response"
+      manifest='[]'; specs='[]'
+      while IFS= read -r spec; do
+        local_path="${spec%%:*}"; rest="${spec#*:}"; dest="${rest%%:*}"; mode="0755"
+        [[ "$rest" == *:* ]] && mode="${rest##*:}"
+        local_path=$(absolute_file "$local_path")
+        size=$(wc -c < "$local_path" | tr -d '[:space:]'); sha=$(file_sha "$local_path")
+        rel="artifact-$(printf '%s' "$dest" | tr -c 'a-zA-Z0-9._-' '-')"
+        entry=$("$JQ_BIN" -n --arg path "$rel" --arg sha "$sha" --argjson size "$size" '{path:$path,sha256:$sha,size:$size}')
+        manifest=$(printf '%s' "$manifest" | "$JQ_BIN" -c --argjson e "$entry" '. + [$e]')
+        specs=$(printf '%s' "$specs" | "$JQ_BIN" -c --arg path "$rel" --arg dest "$dest" --argjson mode "$((8#$mode))" '. + [{path:$path,dest:$dest,mode:$mode}]')
+        # Reuse the shared start/PUT/finalize helper (stage_project_file reads
+        # <root>/<rel>): copy the artifact under its manifest name into a temp root.
+        tmpdir=$(mktemp -d); cp "$local_path" "$tmpdir/$rel"
+        stage_project_file "$drive_id" "$tmpdir" "$entry"
+        rm -rf "$tmpdir"
+      done < <(printf '%s' "$artifacts" | "$JQ_BIN" -r '.[]')
+      body=$("$JQ_BIN" -n --arg name "$img_name" --arg base "$base" --arg entrypoint "$entrypoint" \
+        --argjson env "$envs" --arg driveId "$drive_id" --argjson manifest "$manifest" --argjson artifacts "$specs" \
+        '{name:$name,base:$base,entrypoint:$entrypoint,env:$env,driveId:$driveId,manifest:$manifest,artifacts:$artifacts}')
+      assembled=$(api_account POST "$BASE_URL/api/v1/fullstack/images" "$body")
+      image_ref=$(printf '%s' "$assembled" | "$JQ_BIN" -r '.image // empty')
+      [[ -n "$image_ref" ]] || die "assembly did not return an image reference"
+      api_account DELETE "$BASE_URL/api/v1/drives/$drive_id" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$folder" && -f "$folder/fullstack.yaml" ]] && grep -q "runtime: container" "$folder/fullstack.yaml"; then
+      sed -i.bak -E "s|^([[:space:]]*image:).*|\\1 $image_ref|" "$folder/fullstack.yaml" && rm -f "$folder/fullstack.yaml.bak"
+      updated_yaml="true"
+    else
+      updated_yaml="false"
+    fi
+    "$JQ_BIN" -n --arg image "$image_ref" --arg updatedYaml "$updated_yaml" \
+      '{image:$image,updatedYaml:($updatedYaml=="true"),next:"Pin this exact reference as container.image in fullstack.yaml, then ship the folder."}'
     ;;
   ship)
     [[ $# -ge 1 ]] || die "usage: fullstack.sh ship <project-folder> [--app <app-id>] [--secrets-from <mode-600-json-file>]"

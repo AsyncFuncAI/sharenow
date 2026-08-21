@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.21.0**
+**Skill version: 1.22.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -324,6 +324,52 @@ if (request.method === "GET" || request.method === "HEAD") {
   return env.ASSETS.fetch(new Request(new URL("/index.html", url.origin), { headers: request.headers }));
 }
 ```
+
+### Container apps (`runtime: container`)
+
+Prefer the worker runtime - it is faster to ship, cheaper, and needs no
+Docker. Choose `runtime: container` only when the app needs a compiled binary
+or runtime the Worker platform cannot run, raw TCP egress (SSH, database wire
+protocols), a long-lived process, or more CPU than Workers allow. It is a
+capability the server may not have enabled; a clear error says so.
+
+```yaml
+slug: my-service
+runtime: container
+container:
+  image: registry.cloudflare.com/<account>/my-service@sha256:...
+  port: 8080
+  instance: dev
+env:
+  - SERVICE_API_KEY
+```
+
+The DIGEST is the approved artifact - `push` produces it:
+
+```bash
+# Lane 1 (local Docker): build the folder's Dockerfile and push.
+./scripts/fullstack.sh push ./my-service --name my-service
+
+# Lane 2 (no Docker anywhere): assemble prebuilt artifacts onto a base image
+# server-side. Cross-compile locally, then:
+./scripts/fullstack.sh push --assemble --name my-service \
+  --base alpine:3.20 --entrypoint /usr/local/bin/server \
+  --artifact ./server-linux-amd64:/usr/local/bin/server:0755
+```
+
+Both lanes print the digest reference and write it into `fullstack.yaml` when
+the folder declares `runtime: container`. Then `ship` the folder as usual.
+The no-Docker lane composes base + files + entrypoint only; it cannot run
+Dockerfile RUN steps - build steps happen on your machine before push.
+
+Container facts to design around: the filesystem is EPHEMERAL - every update
+replaces the instance, so persist through your own external stores and make
+in-flight work resumable. Managed bindings (d1/r2/kv/queues) and triggers are
+worker-runtime features; container apps bring their own persistence and
+scheduling. Env values arrive as real environment variables (file-shaped
+secrets like SSH keys ride as a base64 env var your entrypoint writes to a
+file). `sql` does not apply; `logs` shows request events at the platform edge,
+not container stdout.
 
 ### Bundle limits
 
