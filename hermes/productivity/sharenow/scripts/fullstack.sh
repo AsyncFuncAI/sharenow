@@ -223,6 +223,16 @@ is_sensitive_path() {
 
 project_manifest() {
   local root="$1" manifest='[]' count=0 total=0 file_path rel size sha
+  # A `runtime: container` contract ships ONLY fullstack.yaml - the platform
+  # runs a pushed image, so nothing else in the folder is staged. Skip the
+  # whole-tree scan so shipping straight from a real app repo (symlinks,
+  # thousands of files) works.
+  if grep -qE '^runtime:[[:space:]]*"?container"?[[:space:]]*$' "$root/fullstack.yaml" 2>/dev/null; then
+    size=$(wc -c < "$root/fullstack.yaml" | tr -d '[:space:]')
+    sha=$(file_sha "$root/fullstack.yaml")
+    "$JQ_BIN" -n --arg sha "$sha" --argjson size "$size" '[{path:"fullstack.yaml",sha256:$sha,size:$size}]'
+    return 0
+  fi
   if find "$root" -type l -print -quit | grep -q .; then
     die "project contains a symbolic link; copy the intended file into the folder instead"
   fi
@@ -619,8 +629,13 @@ case "$CMD" in
     else
       updated_yaml="false"
     fi
-    "$JQ_BIN" -n --arg image "$image_ref" --arg updatedYaml "$updated_yaml" \
-      '{image:$image,updatedYaml:($updatedYaml=="true"),next:"Pin this exact reference as container.image in fullstack.yaml, then ship the folder."}'
+    if [[ "$updated_yaml" == true ]]; then
+      next_step="fullstack.yaml now pins this exact reference; ship the folder."
+    else
+      next_step="Pin this exact reference as container.image in fullstack.yaml, then ship the folder."
+    fi
+    "$JQ_BIN" -n --arg image "$image_ref" --arg updatedYaml "$updated_yaml" --arg next "$next_step" \
+      '{image:$image,updatedYaml:($updatedYaml=="true"),next:$next}'
     ;;
   ship)
     [[ $# -ge 1 ]] || die "usage: fullstack.sh ship <project-folder> [--app <app-id>] [--secrets-from <mode-600-json-file>]"

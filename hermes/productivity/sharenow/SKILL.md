@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.22.0**
+**Skill version: 1.22.1**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -361,6 +361,16 @@ Both lanes print the digest reference and write it into `fullstack.yaml` when
 the folder declares `runtime: container`. Then `ship` the folder as usual.
 The no-Docker lane composes base + files + entrypoint only; it cannot run
 Dockerfile RUN steps - build steps happen on your machine before push.
+A container ship stages only `fullstack.yaml` - the rest of the folder is
+never scanned or uploaded, so shipping straight from your app repo works.
+
+Health checks: the platform probes `GET /` on the container port with a
+synthetic Host (`containerstarthealthcheck` or `ping`) and treats an absolute
+`https://` redirect as a failure - an auth wall that redirects `/` to a hosted
+login page keeps the app stuck at "Failed to start container". Answer those
+two Hosts with a plain `200` before your auth layer runs (in Next.js
+middleware: check `request.headers.get("host")` and return `new
+Response("ok")`).
 
 Container facts to design around: the filesystem is EPHEMERAL - every update
 replaces the instance, so persist through your own external stores and make
