@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.22.1**
+**Skill version: 1.23.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -372,6 +372,17 @@ two Hosts with a plain `200` before your auth layer runs (in Next.js
 middleware: check `request.headers.get("host")` and return `new
 Response("ok")`).
 
+Framework apps (Next.js and similar): run the production build on YOUR
+machine and have the Dockerfile COPY the prebuilt output in - do not run the
+framework build inside `docker build` (observed producing a silently degraded
+bundle: missing CSS, absent client chunks, wrong routing, while the same
+source built healthy outside `docker build`). Keep the image small - a cold
+start pulls it, so a ~100 MB image wakes in seconds while ~1 GB takes a
+minute or more; prefer the framework's minimal server output (Next.js
+`output: "standalone"`). If the app bakes its public URL into the client at
+build time (`NEXT_PUBLIC_*`), ship once, `rename` to the final slug, then
+rebuild with that URL and update the app.
+
 Container facts to design around: the filesystem is EPHEMERAL - every update
 replaces the instance, so persist through your own external stores and make
 in-flight work resumable. Managed bindings (d1/r2/kv/queues) and triggers are
@@ -379,7 +390,9 @@ worker-runtime features; container apps bring their own persistence and
 scheduling. Env values arrive as real environment variables (file-shaped
 secrets like SSH keys ride as a base64 env var your entrypoint writes to a
 file). `sql` does not apply; `logs` shows request events at the platform edge,
-not container stdout.
+not container stdout. An idle container scales to zero; the next request
+boots it again (seconds for a small image). `ship` waits up to ~90s for a
+container app's first response before reporting the address as ready.
 
 ### Bundle limits
 

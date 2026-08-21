@@ -119,16 +119,21 @@ valid_branded_url() {
 }
 
 wait_for_branded_url() {
-  local url="$1" attempt=0 code delay
+  # A container app's first request pulls the image and boots the instance,
+  # so give it a real window (~90s) and keep waiting through the transient
+  # 5xx the platform serves while starting. Worker apps keep the short wait.
+  local url="$1" runtime="${2:-worker}" attempt=0 code delay max_attempts=6
+  [[ "$runtime" == container ]] && max_attempts=20
   valid_branded_url "$url" || die "invalid Fullstack live URL"
-  while [[ "$attempt" -lt 6 ]]; do
-    code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 5 "$url" || true)
+  while [[ "$attempt" -lt "$max_attempts" ]]; do
+    code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "$url" || true)
     case "$code" in
-      [12345][0-9][0-9]) [[ "$code" != 404 ]] && return 0 ;;
+      [123][0-9][0-9]|40[0-35-9]|4[1-9][0-9]) return 0 ;;  # any real answer except 404 (propagation)
     esac
     attempt=$((attempt + 1))
-    [[ "$attempt" -lt 6 ]] || break
-    if [[ "$attempt" -le 2 ]]; then delay=1
+    [[ "$attempt" -lt "$max_attempts" ]] || break
+    if [[ "$runtime" == container ]]; then delay=5
+    elif [[ "$attempt" -le 2 ]]; then delay=1
     elif [[ "$attempt" -le 4 ]]; then delay=2
     else delay=3; fi
     sleep "$delay"
@@ -496,7 +501,12 @@ case "$CMD" in
       fi
     fi
     address_state="unavailable"
-    if wait_for_branded_url "$url"; then address_state="ready"; else address_state="propagating"; fi
+    deploy_runtime="worker"
+    contract_file=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.contractPath // empty')
+    if [[ -n "$contract_file" && -f "$contract_file" ]] && grep -qE '^runtime:[[:space:]]*"?container"?[[:space:]]*$' "$contract_file"; then
+      deploy_runtime="container"
+    fi
+    if wait_for_branded_url "$url" "$deploy_runtime"; then address_state="ready"; else address_state="propagating"; fi
     "$JQ_BIN" -n --arg appId "$app_id" --arg state "$state" --arg url "$url" --arg addressState "$address_state" --arg stagingDrive "$staging_drive" \
       '{appId:$appId,state:$state,persistence:"permanent",addressState:$addressState,stagingDrive:$stagingDrive}
       + (if $addressState == "ready" then {url:$url}
