@@ -746,10 +746,14 @@ case "$CMD" in
         while IFS=$'\t' read -r name fp; do
           [[ -n "$name" ]] || continue
           live_names=$(printf '%s' "$live_names" | "$JQ_BIN" -c --arg n "$name" '. + [$n]')
-          local_value=$("$JQ_BIN" -r --arg n "$name" '.[$n] // empty' "$sfile" 2>/dev/null || true)
-          if [[ -z "$local_value" ]]; then
+          if [[ "$("$JQ_BIN" -r --arg n "$name" 'has($n)' "$sfile" 2>/dev/null)" != true ]]; then
             missing_local=$(printf '%s' "$missing_local" | "$JQ_BIN" -c --arg n "$name" '. + [$n]')
-          elif [[ "$(env_fingerprint_local "$salt" "$local_value")" == "$fp" ]]; then
+            continue
+          fi
+          # Byte-exact: jq -j emits the value verbatim (a trailing newline in a
+          # PEM key survives; $(...) substitution would strip it and lie).
+          local_fp=$({ printf '%s:' "$salt"; "$JQ_BIN" -j --arg n "$name" '.[$n]' "$sfile"; } | shasum -a 256 | cut -c1-12)
+          if [[ "$local_fp" == "$fp" ]]; then
             matches=$(printf '%s' "$matches" | "$JQ_BIN" -c --arg n "$name" '. + [$n]')
           else
             rotate=$(printf '%s' "$rotate" | "$JQ_BIN" -c --arg n "$name" '. + [$n]')
