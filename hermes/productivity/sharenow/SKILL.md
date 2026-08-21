@@ -13,7 +13,11 @@ description: >
 
 # sharenow
 
-**Skill version: 1.25.0**
+**Skill version: 1.25.1**
+
+What changed between versions is in `CHANGELOG.md` next to this file, always
+served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
+from there, not from commit history.
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
