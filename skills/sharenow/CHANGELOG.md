@@ -5,6 +5,14 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.26.0
+
+- Secrets stay write-only but are now VERIFIABLE: the owner `status` response
+  carries a per-key fingerprint (`sha256(salt + ":" + value)`, first 12 hex)
+  and a last-set time. Recompute locally to check a secrets file against the
+  live app, or to see which keys were rotated when. Values never travel.
+  Fingerprints appear on the app's next deploy or update.
+
 ## 1.25.1
 
 - This file. The changelog now ships in the package and is served with it.

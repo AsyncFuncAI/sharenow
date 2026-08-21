@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.25.1**
+**Skill version: 1.26.0**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -429,6 +429,19 @@ That browser-only surface shows operational analytics, provides bounded read-onl
 SQL browsing and export, and lets the owner replace or delete write-only
 environment values. Do not ask the dashboard to reveal a stored value. It cannot
 recover one; the owner rotates it by submitting a replacement.
+
+Secret values are write-only forever, but they are VERIFIABLE: the owner
+`status` response carries, per env key, a fingerprint and a last-set time.
+To check whether a local secrets file matches the live app, recompute each
+fingerprint locally and compare - the value never travels:
+
+```bash
+printf '%s:%s' "$fingerprintSalt" "$value" | shasum -a 256 | cut -c1-12
+```
+
+A matching fingerprint means the local value IS the live one. A mismatch, or
+a lost secrets file, means rotate that key; `lastSetAt` tells you which keys
+were rotated when.
 
 The `loop-crm` starter demonstrates an HTTP intake route, SQL loop state,
 private file reports, a background model task with retries, a scheduled
