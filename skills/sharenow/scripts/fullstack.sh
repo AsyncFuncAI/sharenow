@@ -27,6 +27,8 @@ Commands:
   status <app-id>
   sql <app-id> <select-statement> [--binding <name>]
   logs <app-id> [--seconds <5-60>]
+  secrets check <app-id> [--file <secrets.json>]
+  secrets set <app-id> <NAME> --value-from <mode-600-file>
   rename <app-id> <new-slug>
   delete <app-id> --confirm <app-id> [--dry-run]
 
@@ -312,6 +314,26 @@ verify_receipt_content() {
   [[ "$manifest_sha" == "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.manifestSha256')" ]] || die "manifest changed after approval; create and approve a new plan"
 }
 
+# The CLI owns the canonical per-app secrets file so nobody babysits a stray
+# path: every successful deploy/update that carried --secrets-from installs a
+# mode-600 copy here, and `secrets check` reads it by default.
+canonical_secrets_path() {
+  printf '%s/.sharenow/apps/%s/secrets.json' "$HOME" "$1"
+}
+
+install_canonical_secrets() {
+  local app_id="$1" source_file="$2" dir
+  [[ -n "$source_file" && -f "$source_file" ]] || return 0
+  dir="$HOME/.sharenow/apps/$app_id"
+  mkdir -p "$dir" && chmod 700 "$HOME/.sharenow" "$HOME/.sharenow/apps" "$dir" 2>/dev/null
+  cp "$source_file" "$dir/secrets.json" && chmod 600 "$dir/secrets.json"
+}
+
+env_fingerprint_local() {
+  # sha256(salt + ":" + value), first 12 hex - must match the server recipe.
+  printf '%s:%s' "$1" "$2" | shasum -a 256 | cut -c1-12
+}
+
 make_idempotency_key() {
   if command -v openssl >/dev/null 2>&1; then openssl rand -hex 24
   elif command -v node >/dev/null 2>&1; then node -e 'process.stdout.write(require("crypto").randomBytes(24).toString("hex"))'
@@ -494,6 +516,7 @@ case "$CMD" in
     [[ -n "$url" ]] && valid_branded_url "$url" || die "invalid Fullstack live URL"
     api_account POST "$BASE_URL/api/v1/fullstack/$app_id/claim" "$($JQ_BIN -n --arg token "$claim_token" '{token:$token}')" >/dev/null
     unset claim_token created
+    install_canonical_secrets "$app_id" "$secrets_file"
     staging_drive="not_applicable"
     if [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project ]]; then
       drive_id=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')
@@ -569,6 +592,7 @@ case "$CMD" in
     unset body env_json yaml validation
     [[ "$(printf '%s' "$updated" | "$JQ_BIN" -r '.appId // empty')" == "$app_id" ]] || die "Fullstack update response changed the app id"
     [[ "$(printf '%s' "$updated" | "$JQ_BIN" -r '.updated // false')" == true ]] || die "Fullstack update did not confirm success"
+    install_canonical_secrets "$app_id" "$secrets_file"
     staging_drive="not_applicable"
     if [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project ]]; then
       drive_id=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')
@@ -699,6 +723,75 @@ case "$CMD" in
     else
       "$0" deploy "$ship_plan_id" ${ship_args[@]+"${ship_args[@]}"}
     fi
+    ;;
+  secrets)
+    [[ $# -ge 2 ]] || die "usage: fullstack.sh secrets check <app-id> [--file <secrets.json>] | secrets set <app-id> <NAME> --value-from <mode-600-file>"
+    sub="$1"; app_id="$2"; shift 2
+    valid_app_id "$app_id"
+    load_account_key
+    case "$sub" in
+      check)
+        sfile="$(canonical_secrets_path "$app_id")"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --file) [[ $# -ge 2 ]] || die "--file requires a path"; sfile="$2"; shift 2 ;;
+            *) die "unexpected secrets check argument: $1" ;;
+          esac
+        done
+        [[ -f "$sfile" ]] || die "no local secrets file at $sfile (pass --file, or redeploy once with --secrets-from to install the canonical copy)"
+        status_json=$(api_account GET "$BASE_URL/api/v1/fullstack/$app_id/status")
+        salt=$(printf '%s' "$status_json" | "$JQ_BIN" -r '.env.fingerprintSalt // empty')
+        [[ -n "$salt" ]] || die "the live app has no fingerprints yet: deploy or update it once (server 1.26+) and retry"
+        matches="[]"; rotate="[]"; missing_local="[]"; live_names="[]"
+        while IFS=$'\t' read -r name fp; do
+          [[ -n "$name" ]] || continue
+          live_names=$(printf '%s' "$live_names" | "$JQ_BIN" -c --arg n "$name" '. + [$n]')
+          local_value=$("$JQ_BIN" -r --arg n "$name" '.[$n] // empty' "$sfile" 2>/dev/null || true)
+          if [[ -z "$local_value" ]]; then
+            missing_local=$(printf '%s' "$missing_local" | "$JQ_BIN" -c --arg n "$name" '. + [$n]')
+          elif [[ "$(env_fingerprint_local "$salt" "$local_value")" == "$fp" ]]; then
+            matches=$(printf '%s' "$matches" | "$JQ_BIN" -c --arg n "$name" '. + [$n]')
+          else
+            rotate=$(printf '%s' "$rotate" | "$JQ_BIN" -c --arg n "$name" '. + [$n]')
+          fi
+        done < <(printf '%s' "$status_json" | "$JQ_BIN" -r '.env.keys[]? | [.name, .fingerprint] | @tsv')
+        local_only=$("$JQ_BIN" -c --argjson live "$live_names" 'keys - $live' "$sfile")
+        "$JQ_BIN" -n --arg file "$sfile" --argjson match "$matches" --argjson rotate "$rotate" \
+          --argjson missingLocal "$missing_local" --argjson localOnly "$local_only" \
+          '{file:$file,match:$match,rotateNeeded:$rotate,missingLocal:$missingLocal,localOnly:$localOnly}
+           + (if ($rotate|length)==0 and ($missingLocal|length)==0 then {verdict:"local file matches the live app"} else {verdict:"rotate the listed keys or restore the file"} end)'
+        ;;
+      set)
+        [[ $# -ge 1 ]] || die "usage: fullstack.sh secrets set <app-id> <NAME> --value-from <mode-600-file>"
+        env_name="$1"; shift; value_file=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --value-from) [[ $# -ge 2 ]] || die "--value-from requires a path"; value_file="$2"; shift 2 ;;
+            *) die "unexpected secrets set argument: $1 (values never travel as arguments)" ;;
+          esac
+        done
+        [[ "$env_name" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "invalid environment name"
+        [[ -n "$value_file" && -f "$value_file" ]] || die "--value-from <mode-600-file> is required (the file's contents become the value; values never travel as arguments)"
+        [[ "$(file_mode "$value_file")" == 600 ]] || die "value file must have mode 600"
+        new_value=$(cat "$value_file")
+        # Strip exactly one trailing newline (editors add one; keys rarely want it).
+        new_value="${new_value%$'\n'}"
+        [[ -n "$new_value" ]] || die "value file is empty"
+        body=$("$JQ_BIN" -n --rawfile v "$value_file" '{value:($v|rtrimstr("\n"))}')
+        result=$(api_account PUT "$BASE_URL/api/v1/fullstack/$app_id/env/$env_name" "$body")
+        unset body
+        canonical="$(canonical_secrets_path "$app_id")"
+        if [[ -f "$canonical" ]]; then
+          tmp="$canonical.tmp.$$" && "$JQ_BIN" --arg n "$env_name" --arg v "$new_value" '.[$n]=$v' "$canonical" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$canonical"
+          canonical_state="updated"
+        else
+          canonical_state="absent (redeploy once with --secrets-from to install it)"
+        fi
+        unset new_value
+        printf '%s' "$result" | "$JQ_BIN" --arg canonical "$canonical_state" '. + {canonicalFile:$canonical}'
+        ;;
+      *) die "unknown secrets subcommand: $sub (use check or set)" ;;
+    esac
     ;;
   status)
     [[ $# -eq 1 ]] || die "usage: fullstack.sh status <app-id>"

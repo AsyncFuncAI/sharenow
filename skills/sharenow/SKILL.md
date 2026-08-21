@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.26.0**
+**Skill version: 1.27.0**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -430,18 +430,23 @@ SQL browsing and export, and lets the owner replace or delete write-only
 environment values. Do not ask the dashboard to reveal a stored value. It cannot
 recover one; the owner rotates it by submitting a replacement.
 
-Secret values are write-only forever, but they are VERIFIABLE: the owner
-`status` response carries, per env key, a fingerprint and a last-set time.
-To check whether a local secrets file matches the live app, recompute each
-fingerprint locally and compare - the value never travels:
+Secret values are write-only forever, but nobody babysits a stray file: every
+successful deploy or update that carried `--secrets-from` installs a mode-600
+canonical copy at `~/.sharenow/apps/<app-id>/secrets.json`, and:
 
 ```bash
-printf '%s:%s' "$fingerprintSalt" "$value" | shasum -a 256 | cut -c1-12
+./scripts/fullstack.sh secrets check <app-id>
+./scripts/fullstack.sh secrets set <app-id> STRIPE_KEY --value-from <mode-600-file>
 ```
 
-A matching fingerprint means the local value IS the live one. A mismatch, or
-a lost secrets file, means rotate that key; `lastSetAt` tells you which keys
-were rotated when.
+`secrets check` compares the local file against the live app per key and says
+match or rotate - values never travel; the owner `status` response carries a
+per-key fingerprint (`sha256(salt + ":" + value)`, first 12 hex) and a
+last-set time, and check does the hashing for you. `secrets set` rotates ONE
+key on a worker-runtime app without re-uploading the map (the value rides in
+a file, never an argument) and keeps the canonical copy in sync. Container
+apps rotate via `ship <folder> --app <app-id>`; a lost file with no backup
+still means rotate, by design.
 
 The `loop-crm` starter demonstrates an HTTP intake route, SQL loop state,
 private file reports, a background model task with retries, a scheduled

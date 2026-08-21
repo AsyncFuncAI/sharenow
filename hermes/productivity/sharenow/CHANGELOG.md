@@ -5,6 +5,17 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.27.0
+
+- The CLI owns the secrets file: every deploy/update with `--secrets-from`
+  installs a mode-600 canonical copy at `~/.sharenow/apps/<id>/secrets.json`.
+- `secrets check <app-id>` compares that file against the live app's
+  fingerprints and answers match-or-rotate per key. No hashing by hand.
+- `secrets set <app-id> NAME --value-from <file>` rotates ONE key on a
+  worker-runtime app (agent API parity with the dashboard) and keeps the
+  canonical file in sync. Dashboard and API single-key edits now keep
+  fingerprints truthful. Container apps rotate via `ship --app`.
+
 ## 1.26.0
 
 - Secrets stay write-only but are now VERIFIABLE: the owner `status` response
