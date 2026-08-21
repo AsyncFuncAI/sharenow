@@ -510,8 +510,20 @@ case "$CMD" in
       deploy_runtime="container"
     fi
     if wait_for_branded_url "$url" "$deploy_runtime"; then address_state="ready"; else address_state="propagating"; fi
+    boot_log="[]"
+    if [[ "$deploy_runtime" == container ]]; then
+      # Surface the container's own boot output in the receipt so a misconfig
+      # (missing env, crashed entrypoint) is visible at deploy time instead of
+      # at the first deep user action. Best-effort: a logs failure never
+      # fails the deploy.
+      boot_log=$(api_account POST "$BASE_URL/api/v1/fullstack/$app_id/logs" '{"seconds":5}' 2>/dev/null \
+        | "$JQ_BIN" -c '[.container.lines // [] | .[-12:][] | .level + " " + .message]' 2>/dev/null) || boot_log="[]"
+      [[ -n "$boot_log" ]] || boot_log="[]"
+    fi
     "$JQ_BIN" -n --arg appId "$app_id" --arg state "$state" --arg url "$url" --arg addressState "$address_state" --arg stagingDrive "$staging_drive" \
+      --arg runtime "$deploy_runtime" --argjson bootLog "$boot_log" \
       '{appId:$appId,state:$state,persistence:"permanent",addressState:$addressState,stagingDrive:$stagingDrive}
+      + (if $runtime == "container" then {bootLog:$bootLog} else {} end)
       + (if $addressState == "ready" then {url:$url}
          elif $addressState == "propagating" then {next:("The app is permanent. Its address is still finishing. Run fullstack.sh status " + $appId + " in a few seconds.")}
          else {} end)'
@@ -566,7 +578,17 @@ case "$CMD" in
         staging_drive="retained"
       fi
     fi
-    printf '%s' "$updated" | "$JQ_BIN" --arg stagingDrive "$staging_drive" '. + {stagingDrive:$stagingDrive}'
+    boot_log="[]"
+    if grep -qE '^runtime:[[:space:]]*"?container"?[[:space:]]*$' "$contract_path" 2>/dev/null; then
+      # A container update replaces the instance; show its fresh boot output
+      # in the receipt (best-effort - a logs failure never fails the update).
+      boot_log=$(api_account POST "$BASE_URL/api/v1/fullstack/$app_id/logs" '{"seconds":5}' 2>/dev/null \
+        | "$JQ_BIN" -c '[.container.lines // [] | .[-12:][] | .level + " " + .message]' 2>/dev/null) || boot_log="[]"
+      [[ -n "$boot_log" ]] || boot_log="[]"
+      printf '%s' "$updated" | "$JQ_BIN" --arg stagingDrive "$staging_drive" --argjson bootLog "$boot_log" '. + {stagingDrive:$stagingDrive,bootLog:$bootLog}'
+    else
+      printf '%s' "$updated" | "$JQ_BIN" --arg stagingDrive "$staging_drive" '. + {stagingDrive:$stagingDrive}'
+    fi
     ;;
   push)
     # Build + push a container image for `runtime: container` contracts.

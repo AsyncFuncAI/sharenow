@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.24.0**
+**Skill version: 1.25.0**
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -387,14 +387,21 @@ Container facts to design around: the filesystem is EPHEMERAL - every update
 replaces the instance, so persist through your own external stores and make
 in-flight work resumable. Managed bindings (d1/r2/kv/queues) and triggers are
 worker-runtime features; container apps bring their own persistence and
-scheduling. Env values arrive as real environment variables (file-shaped
-secrets like SSH keys ride as a base64 env var your entrypoint writes to a
-file). `sql` does not apply. `logs` returns the edge request events PLUS
+scheduling. Env values arrive as real environment variables and MAY BE
+MULTI-LINE - pass an SSH key or PEM certificate as its raw text whenever the
+app reads it from an env var. Reach for the base64-env-plus-entrypoint
+pattern ONLY when the app insists on an actual file on disk, and remember
+BOTH sides: the image's entrypoint must decode the var and write the file,
+or the app silently runs unconfigured until the first code path that needs
+it. `sql` does not apply. `logs` returns the edge request events PLUS
 `container.lines`: the app's persisted stdout/stderr from the last 15
 minutes - boot output and crash messages included - so a container that
-fails to start can be debugged without local Docker. An idle container
-scales to zero; the next request boots it again (seconds for a small
-image). `ship` waits up to ~90s for a container app's first response
+fails to start can be debugged without local Docker. A container `ship` or
+update receipt also carries `bootLog` (the container's recent output):
+READ IT before declaring the deploy done - a config error printed at boot
+is visible there immediately, not at the first deep user action. An idle
+container scales to zero; the next request boots it again (seconds for a
+small image). `ship` waits up to ~90s for a container app's first response
 before reporting the address as ready.
 
 ### Bundle limits
