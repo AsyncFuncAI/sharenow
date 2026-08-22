@@ -5,6 +5,12 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.28.1
+
+- `up` host build steps write to stderr so stdout carries only the receipt
+  JSON; piping `up` to jq no longer corrupts the parse or kills the build
+  with EPIPE. Found dogfooding the dashboard deploy minutes after 1.28.0.
+
 ## 1.28.0
 
 - New `up` verb: one-command create-or-update deploy driven entirely by the

@@ -795,7 +795,10 @@ case "$CMD" in
           while IFS= read -r up_step; do
             [[ -n "$up_step" ]] || continue
             echo "==> host step: $up_step" >&2
-            (cd "$up_folder" && bash -c "$up_step") || { up_rc=$?; break; }
+            # Steps write to stderr: up's stdout carries ONLY the receipt JSON,
+            # and a consumer piping it to jq must never see build output (or
+            # kill the build with EPIPE when it stops reading).
+            (cd "$up_folder" && bash -c "$up_step") >&2 || { up_rc=$?; break; }
           done <<< "$up_steps"
         fi
         [[ -z "$up_held" ]] || mv "$up_folder/$up_hold.up-hold" "$up_folder/$up_hold"
