@@ -27,10 +27,15 @@
 http_handle_response() {
   local code="$1" tmp="$2"
   if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
-    local err candidates
+    local err candidates limit_line
     err=$("$JQ_BIN" -r '.error // .message // empty' "$tmp" 2>/dev/null || true)
     [[ -n "$err" ]] || err="$(cat "$tmp")"
     candidates=$("$JQ_BIN" -r '.details.candidates // [] | .[]' "$tmp" 2>/dev/null || true)
+    # A limit_exceeded envelope carries the numbers that answer "which quota,
+    # how much, and when does it reset" - surface them instead of dropping them.
+    limit_line=$("$JQ_BIN" -r 'select(.details.reason? == "limit_exceeded") | .details
+      | "quota: \(.metric): \(.used) used of \(.included) this period; resets \(.resetAt | todate)"' "$tmp" 2>/dev/null || true)
+    [[ -z "$limit_line" ]] || echo "$limit_line" >&2
     rm -f "$tmp"
     if [[ -n "$candidates" ]]; then
       echo "error: HTTP $code: $err" >&2
