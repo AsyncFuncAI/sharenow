@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.27.2**
+**Skill version: 1.28.0**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -244,6 +244,48 @@ prepare, approve, and deploy (or update with `--app`) in one command:
 ./scripts/fullstack.sh ship ./loopdesk
 ./scripts/fullstack.sh ship ./loopdesk --app <app-id> --secrets-from ./secrets.json
 ```
+
+### Continuous deployment: `up`
+
+`up` is the one-verb create-or-update deploy for a folder whose `fullstack.yaml`
+is the whole contract. Run it once to create the app (it writes `app_id:` back
+into the yaml - commit that); run it after every change to redeploy. It carries
+the same approval requirement as `ship`: run it only when your user has already
+approved shipping this exact project.
+
+```bash
+./scripts/fullstack.sh up ./loopdesk
+./scripts/fullstack.sh up ./loopdesk --secrets-from ./secrets.json   # first deploy with declared env
+```
+
+What it infers from the folder, in order:
+
+- No `fullstack.yaml` but a `worker.js`: a minimal worker contract is
+  synthesized first. Review it; env and bindings additions go there.
+- `app_id:` present: update that app. Absent: create, then write it back.
+- `runtime: container`: the image is rebuilt and digest-pinned before shipping.
+  The folder's single Dockerfile is used; with several, declare one. An
+  optional `build:` block (every key optional) declares the build:
+
+  ```yaml
+  app_id: fsa_...              # written by up on first create
+  build:
+    dockerfile: Dockerfile.api # default: the folder's single Dockerfile
+    name: my-api               # pushed image name; default: folder name
+    steps:                     # host commands run BEFORE docker build
+      - npm run build
+    env_hold: .env.local       # moved aside while steps run, always restored
+  ```
+
+  `steps` exist for frameworks whose bundles must be built on the host (a
+  Next.js `next build` inside docker corrupts silently; `up` refuses that
+  shape unless steps are declared). `env_hold` keeps a local dotenv file out
+  of the host build so it cannot bake dev values into the bundle.
+- Secrets: an app with a known `app_id` reuses the canonical secrets file
+  installed by earlier deploys automatically; `--secrets-from` always wins.
+
+The digest pin written into `container.image` after each push makes the
+committed yaml the auditable record of exactly what is live.
 
 ### Evolving the database schema (migrations)
 

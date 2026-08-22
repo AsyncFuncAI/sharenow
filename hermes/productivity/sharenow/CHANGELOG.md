@@ -5,6 +5,24 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.28.0
+
+- New `up` verb: one-command create-or-update deploy driven entirely by the
+  folder's `fullstack.yaml`. First run writes `app_id:` back into the yaml
+  (commit it); every later `up` redeploys that app. Bare `worker.js` folders
+  get a synthesized contract.
+- Optional `build:` block in `fullstack.yaml` declares a container build:
+  `dockerfile`, `name`, host `steps` run before docker build, and `env_hold`
+  to keep a local dotenv out of the build. With no block, the folder's single
+  Dockerfile is used; ambiguity and Next.js in-docker builds are refused with
+  a recipe instead of guessed at.
+- An app with a known `app_id` reuses its canonical secrets file
+  automatically on `up`.
+- Repos carrying a `.sharenow/` state directory are now shippable: staging
+  skips it (like `.git/`) instead of refusing the project.
+- `push` pins the digest only inside the `container:` block, so other
+  indented `image:` keys survive.
+
 ## 1.27.2
 
 - Shipping with `--secrets-from` pointed at the canonical

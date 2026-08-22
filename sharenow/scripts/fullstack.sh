@@ -22,6 +22,7 @@ Commands:
   deploy <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
   update <app-id> <plan-id> [--secrets-from <mode-600-json-file>] [--dry-run]
   ship <project-folder> [--app <app-id>] [--secrets-from <mode-600-json-file>]
+  up [<project-folder>] [--secrets-from <mode-600-json-file>]
   push <folder> [--dockerfile <file>] [--name <image-name>]
   push --assemble --name <n> --base <ref> --entrypoint </path> --artifact <local>:<dest>[:<mode>]... [--env K=V]...
   status <app-id>
@@ -51,6 +52,24 @@ push builds the image a `runtime: container` contract pins. The default lane
 uses local Docker; --assemble needs no Docker anywhere (prebuilt artifacts are
 assembled server-side onto a base image). Both print the digest reference and
 write it into the folder's fullstack.yaml when one declares runtime: container.
+
+up is the one-verb create-or-update deploy: everything it needs lives in the
+folder's fullstack.yaml. `app_id:` (top-level) targets an existing app and is
+written back automatically on first create - commit it. A `runtime: container`
+contract may declare an optional `build:` block (all keys optional):
+  build:
+    dockerfile: Dockerfile.api   # default: the folder's single Dockerfile
+    name: my-api                 # image name; default: folder name
+    steps:                       # host commands run before docker build
+      - npm run build
+    env_hold: .env.local         # file moved aside while steps run
+up runs steps, builds + pushes the image, pins the digest, and ships. With no
+build block it builds the folder's single Dockerfile (two or more must be
+disambiguated with build.dockerfile). A bare folder holding only worker.js
+gets a synthesized worker contract. Secrets: a known app_id reuses the
+canonical file installed by earlier deploys automatically; pass --secrets-from
+for the first deploy of an app that declares env. Like ship, run up only when
+your user has already approved shipping this exact project.
 USAGE
   exit "$code"
 }
@@ -248,7 +267,9 @@ project_manifest() {
   fi
   while IFS= read -r -d '' file_path; do
     rel="${file_path#"$root"/}"
-    case "$rel" in .git/*|node_modules/*|.DS_Store|*/.DS_Store) continue ;; esac
+    # .sharenow/ is OUR state dir (publish.sh already excludes it); skipping it
+    # here keeps repos with sharenow state shippable instead of refused.
+    case "$rel" in .git/*|node_modules/*|.sharenow/*|*/.sharenow/*|.DS_Store|*/.DS_Store) continue ;; esac
     [[ "$rel" != *$'\n'* && "$rel" != /* && "$rel" != *../* && "$rel" != ../* ]] || die "unsafe project path: $rel"
     is_sensitive_path "$rel" && die "sensitive file refused: $rel"
     size=$(wc -c < "$file_path" | tr -d '[:space:]')
@@ -335,6 +356,20 @@ install_canonical_secrets() {
 env_fingerprint_local() {
   # sha256(salt + ":" + value), first 12 hex - must match the server recipe.
   printf '%s:%s' "$1" "$2" | shasum -a 256 | cut -c1-12
+}
+
+# Flat readers for the two fullstack.yaml shapes `up` consumes. Top-level
+# scalars and 2-space-indented keys inside the build: block only - the full
+# contract is parsed server-side; these never have to understand all of YAML.
+yaml_top_get() { # yaml_top_get <file> <key>  (no-match is empty, never an error)
+  { grep -E "^$2:" "$1" 2>/dev/null || true; } | head -1 | sed -E "s/^$2:[[:space:]]*//" | tr -d '" '
+}
+yaml_build_get() { # yaml_build_get <file> <key>
+  sed -n '/^build:/,/^[^ ]/p' "$1" 2>/dev/null | { grep -E "^[[:space:]]{2}$2:" || true; } | head -1 \
+    | sed -E "s/^[[:space:]]+$2:[[:space:]]*//" | tr -d '"'
+}
+yaml_build_steps() { # yaml_build_steps <file> -> one host step per line
+  sed -n '/^build:/,/^[^ ]/p' "$1" 2>/dev/null | sed -n -E 's/^[[:space:]]+-[[:space:]]+//p'
 }
 
 make_idempotency_key() {
@@ -686,7 +721,9 @@ case "$CMD" in
       api_account DELETE "$BASE_URL/api/v1/drives/$drive_id" >/dev/null 2>&1 || true
     fi
     if [[ -n "$folder" && -f "$folder/fullstack.yaml" ]] && grep -q "runtime: container" "$folder/fullstack.yaml"; then
-      sed -i.bak -E "s|^([[:space:]]*image:).*|\\1 $image_ref|" "$folder/fullstack.yaml" && rm -f "$folder/fullstack.yaml.bak"
+      # Scope the pin to the container: block so only container.image moves -
+      # an unscoped match would rewrite any other indented image: key too.
+      sed -i.bak -E "/^container:/,/^[^ ]/ s|^([[:space:]]*image:).*|\\1 $image_ref|" "$folder/fullstack.yaml" && rm -f "$folder/fullstack.yaml.bak"
       updated_yaml="true"
     else
       updated_yaml="false"
@@ -698,6 +735,104 @@ case "$CMD" in
     fi
     "$JQ_BIN" -n --arg image "$image_ref" --arg updatedYaml "$updated_yaml" --arg next "$next_step" \
       '{image:$image,updatedYaml:($updatedYaml=="true"),next:$next}'
+    ;;
+  up)
+    # One-verb create-or-update: fullstack.yaml is the whole deploy contract.
+    # Inference rule: act on what is present; refuse loudly when the folder
+    # shape is ambiguous or known-dangerous. No modes, no flags to learn.
+    up_folder="."; up_secrets=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --secrets-from) [[ $# -ge 2 ]] || die "--secrets-from requires a file"; up_secrets="$2"; shift 2 ;;
+        -*) die "unexpected up argument: $1" ;;
+        *) up_folder="$1"; shift ;;
+      esac
+    done
+    up_folder=$(absolute_dir "$up_folder")
+    up_yaml="$up_folder/fullstack.yaml"
+
+    # 1. First contact: a bare worker folder gets its contract synthesized.
+    if [[ ! -f "$up_yaml" ]]; then
+      [[ -f "$up_folder/worker.js" ]] || die "no fullstack.yaml here and no worker.js to infer one from; write the contract first"
+      {
+        echo "code:"
+        echo "  worker: worker.js"
+        [[ -f "$up_folder/schema.sql" ]] && echo "  schema: schema.sql"
+      } > "$up_yaml"
+      echo "==> synthesized $up_yaml from the folder shape; env/bindings additions go there" >&2
+    fi
+
+    # 2. Identity: app_id in the yaml wins; absent means create-and-write-back.
+    up_app_id=$(yaml_top_get "$up_yaml" app_id)
+    [[ -z "$up_app_id" ]] || valid_app_id "$up_app_id"
+
+    # 3. Container build: run declared host steps, then docker build + push.
+    if grep -qE '^runtime:[[:space:]]*"?container"?[[:space:]]*$' "$up_yaml"; then
+      up_df=$(yaml_build_get "$up_yaml" dockerfile)
+      if [[ -z "$up_df" ]]; then
+        up_found=$(cd "$up_folder" && ls Dockerfile Dockerfile.* 2>/dev/null | grep -v dockerignore || true)
+        up_count=$(printf '%s\n' "$up_found" | grep -c . || true)
+        if [[ "$up_count" -eq 1 ]]; then up_df="$up_found"
+        elif [[ "$up_count" -gt 1 ]]; then
+          die "this folder has $up_count Dockerfiles; declare which one in fullstack.yaml under build: as  dockerfile: <file>"
+        fi
+      fi
+      up_steps=$(yaml_build_steps "$up_yaml")
+      if [[ -n "$up_df" ]]; then
+        # A Next.js bundle built inside docker is known to corrupt silently;
+        # only a declared host build (steps:) is safe to ship.
+        if [[ -z "$up_steps" && -f "$up_folder/package.json" ]] && grep -q '"next"' "$up_folder/package.json"; then
+          die "Next.js app: in-docker builds corrupt the bundle. Declare a host build in fullstack.yaml under build: with  steps: [npm run build]  and  env_hold: .env.local  and COPY the prebuilt .next in your Dockerfile"
+        fi
+        up_hold=$(yaml_build_get "$up_yaml" env_hold)
+        up_held=""
+        if [[ -n "$up_hold" && -f "$up_folder/$up_hold" ]]; then
+          mv "$up_folder/$up_hold" "$up_folder/$up_hold.up-hold" && up_held="yes"
+          echo "==> holding $up_hold aside for the build" >&2
+        fi
+        up_rc=0
+        if [[ -n "$up_steps" ]]; then
+          while IFS= read -r up_step; do
+            [[ -n "$up_step" ]] || continue
+            echo "==> host step: $up_step" >&2
+            (cd "$up_folder" && bash -c "$up_step") || { up_rc=$?; break; }
+          done <<< "$up_steps"
+        fi
+        [[ -z "$up_held" ]] || mv "$up_folder/$up_hold.up-hold" "$up_folder/$up_hold"
+        [[ "$up_rc" -eq 0 ]] || die "build step failed (exit $up_rc)"
+        up_name=$(yaml_build_get "$up_yaml" name)
+        up_push_args=(--dockerfile "$up_df")
+        [[ -z "$up_name" ]] || up_push_args+=(--name "$up_name")
+        "$0" push "$up_folder" "${up_push_args[@]}" >&2 || die "up failed at push"
+      fi
+      grep -qE '^[[:space:]]+image:.*@sha256:[0-9a-f]{64}' "$up_yaml" \
+        || die "container.image is not digest-pinned and no Dockerfile is present to build; add one or pin an image"
+    fi
+
+    # 4. Ship (create or update). A known app reuses its canonical secrets
+    # file automatically; an explicit --secrets-from always wins.
+    up_ship_args=()
+    if [[ -n "$up_app_id" ]]; then
+      up_ship_args+=(--app "$up_app_id")
+      if [[ -z "$up_secrets" && -f "$(canonical_secrets_path "$up_app_id")" ]]; then
+        up_secrets=$(canonical_secrets_path "$up_app_id")
+        echo "==> secrets: canonical file for $up_app_id" >&2
+      fi
+    fi
+    [[ -z "$up_secrets" ]] || up_ship_args+=(--secrets-from "$up_secrets")
+    up_receipt=$("$0" ship "$up_folder" ${up_ship_args[@]+"${up_ship_args[@]}"}) || die "up failed at ship"
+
+    # 5. Write the identity back on first create so the next up updates.
+    up_new_id=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.appId // empty')
+    if [[ -z "$up_app_id" && -n "$up_new_id" ]]; then
+      printf 'app_id: %s\n' "$up_new_id" | cat - "$up_yaml" > "$up_yaml.tmp" && mv "$up_yaml.tmp" "$up_yaml"
+      echo "==> wrote app_id: $up_new_id into fullstack.yaml - commit it; the next up here updates this app" >&2
+    fi
+    if [[ -n "$up_app_id" ]]; then
+      printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"updated"}'
+    else
+      printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"created"}'
+    fi
     ;;
   ship)
     [[ $# -ge 1 ]] || die "usage: fullstack.sh ship <project-folder> [--app <app-id>] [--secrets-from <mode-600-json-file>]"
