@@ -831,6 +831,13 @@ case "$CMD" in
       printf 'app_id: %s\n' "$up_new_id" | cat - "$up_yaml" > "$up_yaml.tmp" && mv "$up_yaml.tmp" "$up_yaml"
       echo "==> wrote app_id: $up_new_id into fullstack.yaml - commit it; the next up here updates this app" >&2
     fi
+    # A contract slug that disagrees with the live app reads like a rename,
+    # but up never renames - say so instead of ignoring it silently.
+    up_yaml_slug=$(yaml_top_get "$up_yaml" slug)
+    up_live_slug=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.slug // empty')
+    if [[ -n "$up_app_id" && -n "$up_yaml_slug" && -n "$up_live_slug" && "$up_yaml_slug" != "$up_live_slug" ]]; then
+      echo "==> note: contract says slug: $up_yaml_slug but the live app is $up_live_slug; up never renames - run 'rename $up_app_id $up_yaml_slug' if the move is intended, or update the contract's slug to match" >&2
+    fi
     if [[ -n "$up_app_id" ]]; then
       printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"updated"}'
     else

@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.28.1**
+**Skill version: 1.28.2**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -283,6 +283,9 @@ What it infers from the folder, in order:
   of the host build so it cannot bake dev values into the bundle.
 - Secrets: an app with a known `app_id` reuses the canonical secrets file
   installed by earlier deploys automatically; `--secrets-from` always wins.
+- `slug:` never renames on update: the live address is identity-stable, and
+  `up` prints a note when the contract disagrees with it. Renames go through
+  the explicit `rename` verb.
 
 The digest pin written into `container.image` after each push makes the
 committed yaml the auditable record of exactly what is live.
