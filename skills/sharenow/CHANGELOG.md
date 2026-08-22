@@ -5,6 +5,16 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.28.6
+
+- `app_id:` and `build:` are now RESERVED contract keys server-side: their
+  names can never be claimed by a future contract feature, and wrong shapes
+  (non-string app_id, non-mapping build) are rejected with clear errors.
+- Documented the no-Docker lane through `up`: `push --assemble` pins the
+  digest, then `up` ships a pinned contract with no Dockerfile as-is.
+- Documented the staleness heuristic: a documented option missing from
+  `--help`, or an undocumented failure, means re-run the installer first.
+
 ## 1.28.5
 
 - Documented: the branded address can serve the previous version (or a

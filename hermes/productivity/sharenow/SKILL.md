@@ -13,11 +13,14 @@ description: >
 
 # sharenow
 
-**Skill version: 1.28.5**
+**Skill version: 1.28.6**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
-from there, not from commit history.
+from there, not from commit history. If a documented command or option is
+missing from a helper's `--help`, or a helper fails in a way these docs do
+not predict, assume your installed copy is stale: re-run the install command
+below, then retry once before debugging further.
 
 Publish finished work to a live URL. The default path is one local file or one
 clearly identified output folder.
@@ -290,6 +293,9 @@ What it infers from the folder, in order:
   previous version (or a placeholder on first create) for up to ~35 seconds
   while the deployment reaches every edge location. That is not a failed
   deploy; verify with a short retry loop, not a single request.
+- No-Docker lane: run `push --assemble` first (it pins the digest into the
+  yaml), then `up` - a contract with a pinned `container.image` and no
+  Dockerfile ships that pin as-is.
 
 The digest pin written into `container.image` after each push makes the
 committed yaml the auditable record of exactly what is live.
