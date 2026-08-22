@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.27.1**
+**Skill version: 1.27.2**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"

@@ -326,6 +326,9 @@ install_canonical_secrets() {
   [[ -n "$source_file" && -f "$source_file" ]] || return 0
   dir="$HOME/.sharenow/apps/$app_id"
   mkdir -p "$dir" && chmod 700 "$HOME/.sharenow" "$HOME/.sharenow/apps" "$dir" 2>/dev/null
+  # Shipping FROM the canonical file itself is the normal steady state; cp
+  # refuses a same-file copy, so skip it (and never fail the deploy receipt).
+  [[ "$source_file" -ef "$dir/secrets.json" ]] && return 0
   cp "$source_file" "$dir/secrets.json" && chmod 600 "$dir/secrets.json"
 }
 
