@@ -832,11 +832,17 @@ case "$CMD" in
       echo "==> wrote app_id: $up_new_id into fullstack.yaml - commit it; the next up here updates this app" >&2
     fi
     # A contract slug that disagrees with the live app reads like a rename,
-    # but up never renames - say so instead of ignoring it silently.
+    # but up never renames (and create assigns a generated address) - say so
+    # instead of ignoring it silently. Create receipts carry no slug key, so
+    # fall back to the address in the url.
     up_yaml_slug=$(yaml_top_get "$up_yaml" slug)
     up_live_slug=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.slug // empty')
-    if [[ -n "$up_app_id" && -n "$up_yaml_slug" && -n "$up_live_slug" && "$up_yaml_slug" != "$up_live_slug" ]]; then
-      echo "==> note: contract says slug: $up_yaml_slug but the live app is $up_live_slug; up never renames - run 'rename $up_app_id $up_yaml_slug' if the move is intended, or update the contract's slug to match" >&2
+    if [[ -z "$up_live_slug" ]]; then
+      up_live_slug=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.url // empty' | sed -nE 's|^https://([^./]+)\..*$|\1|p')
+    fi
+    up_note_id="${up_app_id:-$up_new_id}"
+    if [[ -n "$up_note_id" && -n "$up_yaml_slug" && -n "$up_live_slug" && "$up_yaml_slug" != "$up_live_slug" ]]; then
+      echo "==> note: contract says slug: $up_yaml_slug but the live app is $up_live_slug; up never renames - run 'rename $up_note_id $up_yaml_slug' if the move is intended, or update the contract's slug to match" >&2
     fi
     if [[ -n "$up_app_id" ]]; then
       printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"updated"}'

@@ -5,6 +5,13 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.28.4
+
+- The slug-mismatch note now also fires on CREATE (a create assigns a
+  generated address; a contract asking for `slug: my-name` was silently
+  handed something else). Create receipts carry no slug field, so the note
+  reads the address from the receipt url. From the worker field test.
+
 ## 1.28.3
 
 - Quota errors now show the numbers: a limit_exceeded response prints
