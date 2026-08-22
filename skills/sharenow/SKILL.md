@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.28.4**
+**Skill version: 1.28.5**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -286,6 +286,10 @@ What it infers from the folder, in order:
 - `slug:` never renames on update: the live address is identity-stable, and
   `up` prints a note when the contract disagrees with it. Renames go through
   the explicit `rename` verb.
+- Propagation: after a create or update the branded address can serve the
+  previous version (or a placeholder on first create) for up to ~35 seconds
+  while the deployment reaches every edge location. That is not a failed
+  deploy; verify with a short retry loop, not a single request.
 
 The digest pin written into `container.image` after each push makes the
 committed yaml the auditable record of exactly what is live.
