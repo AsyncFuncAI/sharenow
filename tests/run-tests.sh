@@ -355,7 +355,7 @@ pub_anon_home="$(new_workdir)"
 assert_run "anonymous publish reports one-hour public lifetime" 0 "publish_result.persistence=expires_1h" -- \
   env HOME="$pub_anon_home" STUB_CURL_BODY="$PUB_BODY" \
     /bin/bash "$SCRIPTS/publish.sh" "$pub_wd/index.html"
-assert_run "anonymous publish explains the next permanent-site action" 0 "To keep it permanently" -- \
+assert_run "anonymous publish explains the next permanent-site action" 0 "Keep it live permanently" -- \
   env HOME="$pub_anon_home" STUB_CURL_BODY="$PUB_BODY" \
     /bin/bash "$SCRIPTS/publish.sh" "$pub_wd/index.html"
 
@@ -876,7 +876,7 @@ assert_run "account capability discovery is available to the installed agent" 0 
 
 version_home="$(new_workdir)"
 mkdir -p "$version_home/.sharenow"
-manifest='{"name":"sharenow","source":"AsyncFuncAI/sharenow","version":"1.28.6","latestVersion":"1.28.6","minimumVersion":"1.28.6","files":[{"path":"SKILL.md","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
+manifest='{"name":"sharenow","source":"AsyncFuncAI/sharenow","version":"99.0.0","latestVersion":"99.0.0","minimumVersion":"99.0.0","files":[{"path":"SKILL.md","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
 assert_run "version status reports structured drift state" 0 '"state": "update_required"' -- \
   env HOME="$version_home" STUB_CURL_BODY="$manifest" \
     /bin/bash "$VERSION_SCRIPT" status --force
@@ -1067,12 +1067,13 @@ update_home="$(new_workdir)"
 mkdir -p "$update_home/.agents/skills/sharenow"
 printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$update_home/.agents/skills/sharenow/SKILL.md"
 skill_sha=$(shasum -a 256 "$REPO_ROOT/sharenow/SKILL.md" | awk '{print $1}')
-success_manifest=$(jq -cn --arg sha "$skill_sha" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:"1.28.6",latestVersion:"1.28.6",minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
+skill_version=$(sed -n 's/^\*\*Skill version: \([0-9][0-9.]*\)\*\*$/\1/p' "$REPO_ROOT/sharenow/SKILL.md")
+success_manifest=$(jq -cn --arg sha "$skill_sha" --arg v "$skill_version" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:$v,latestVersion:$v,minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
 assert_run "verified skill update replaces the canonical install in place" 0 '"state": "current"' -- \
   env HOME="$update_home" STUB_CURL_BODY="$success_manifest" SHARENOW_NPX_BIN="$STUBS/npx" SHARENOW_NPX_SOURCE="$REPO_ROOT/sharenow" \
     /bin/bash "$VERSION_SCRIPT" update --yes
-assert_eq "verified update installs version 1.28.6" "yes" \
-  "$(grep -q 'Skill version: 1.28.6' "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
+assert_eq "verified update installs the canonical version" "yes" \
+  "$(grep -q "Skill version: $skill_version" "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
 # ==========================================================================
 # Summary

@@ -58,9 +58,9 @@ else
   die "requires jq. Install it with 'brew install jq' (macOS) or 'sudo apt-get install jq' (Debian/Ubuntu), then retry"
 fi
 
-for cmd in curl file; do
-  command -v "$cmd" >/dev/null 2>&1 || die "requires $cmd"
-done
+# file(1) is optional: content_type_for falls back to it only for unknown
+# extensions and degrades to application/octet-stream when it is absent.
+command -v curl >/dev/null 2>&1 || die "requires curl. Install it with 'brew install curl' (macOS) or 'sudo apt-get install curl' (Debian/Ubuntu), then retry"
 
 # Shared HTTP response handling (needs JQ_BIN + die, both defined above). publish.sh
 # does not use the temp-file api() pattern the other scripts share (its create/
@@ -454,5 +454,6 @@ else
   if [[ -n "$RESPONSE_CLAIM_TOKEN" ]]; then
     echo "claim token saved to $STATE_FILE" >&2
   fi
-  echo "To keep it permanently, open the private claim URL or run ./scripts/account.sh login --client ${CLIENT:-agent}, then publish again." >&2
+  echo "Keep it live permanently: open the claim URL in a browser and add an email (free account, 3 permanent Sites, no card needed)." >&2
+  echo "Agent alternative: run ./scripts/account.sh login --client ${CLIENT:-agent}, then publish again." >&2
 fi

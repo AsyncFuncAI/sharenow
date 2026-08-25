@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.28.6**
+**Skill version: 1.28.8**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -583,6 +583,9 @@ source and is not required before using the bundled helpers.
 ## Completion
 
 After publishing, return the live URL and whether it is permanent or expires in
-one hour. If it is temporary, offer one clear next step: open the private claim
-page, or connect the account and publish again. Do not include claim tokens, API
-keys, Drive tokens, or local state.
+one hour. If it is temporary, give the user the private claim URL with this
+framing: open it and add an email to keep the Site live permanently on a free
+account (3 permanent Sites, no card needed). The claim URL is for that user
+alone; never place it on a public page or in shared output. Alternative: connect
+the account and publish again. Do not include raw claim tokens, API keys, Drive
+tokens, or local state.
