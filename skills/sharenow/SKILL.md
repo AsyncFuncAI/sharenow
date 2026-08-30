@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.28.8**
+**Skill version: 1.29.0**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -422,6 +422,50 @@ The no-Docker lane composes base + files + entrypoint only; it cannot run
 Dockerfile RUN steps - build steps happen on your machine before push.
 A container ship stages only `fullstack.yaml` - the rest of the folder is
 never scanned or uploaded, so shipping straight from your app repo works.
+
+#### Edge caching and headers (`edge:`)
+
+A container app can declare the caching policy the platform applies at the
+edge, on the branded host, in front of the container. Use it for anonymous
+pages a framework renders identically for everyone but stamps `no-store` (a
+Next.js landing page behind an auth middleware is the classic case), and for
+long-lived assets:
+
+```yaml
+edge:
+  cache:
+    - path: /                 # exact match
+      ttl: 600                # seconds at the edge; overrides origin cache-control
+    - path: /docs/*           # prefix: one trailing * only
+      ttl: 600
+  headers:
+    - path: /assets/*
+      set:
+        cache-control: "public, max-age=31536000, immutable"
+```
+
+Rules: only GET is cached; the first matching rule wins. A request carrying
+ANY cookie or an `authorization` header always reaches the origin and is
+never shared (there is no cookie allow-list: the edge cannot tell a
+personalised page from a public one, so a signed-in visitor is simply never
+served from the cache). A response with `set-cookie`, a non-200 status, or a
+`vary` beyond `accept-encoding` is never stored (the Next.js App Router's
+RSC vary members are allowed for plain navigations; the router's own RSC
+fetches carry `_rsc` in the URL and are never shared). Entries expire after `ttl`;
+a ship does not purge, so keep `ttl` short (minutes) for pages you redeploy.
+Every response on a declared path carries `x-sharenow-edge: cache | bypass |
+uncacheable` (what sharenow told the edge) and Cloudflare's own
+`cf-cache-status` (what the edge did). `set-cookie` and transport headers
+cannot be set from `edge.headers`, and a `cache-control` set there gets the
+same anonymous-and-shareable guard as the cache block. At most 32 rules per
+list. Ordering: the first matching rule wins, so list `/a/b/*` before
+`/a/*`. A pattern's `*` is a plain prefix (`/docs*` also matches
+`/docs-admin`; use `/docs/*` for the subtree). Custom auth headers such as
+`x-api-key` are not a bypass signal: put authenticated endpoints on paths
+you do not declare. Edge caching of HTML/JSON needs an `edge.cache` rule;
+a `cache-control` from `edge.headers` alone only steers browsers. A cached
+page is served raw, so ship your own `og:` tags on declared paths (the
+platform's link-preview card is not injected into an edge hit).
 
 Health checks: the platform probes `GET /` on the container port with a
 synthetic Host (`containerstarthealthcheck` or `ping`) and treats an absolute
