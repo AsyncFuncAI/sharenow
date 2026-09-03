@@ -32,6 +32,9 @@ Commands:
   secrets set <app-id> <NAME> --value-from <mode-600-file>
   rename <app-id> <new-slug>
   delete <app-id> --confirm <app-id> [--dry-run]
+  members <app-id>
+  invite <app-id> <email>
+  uninvite <app-id> <email|inv_...|account-id>
 
 Prepare scans one explicit project folder. Its dry-run is local. The live path
 stages accepted files in one private Drive and validates the exact remote bytes
@@ -63,6 +66,11 @@ contract may declare an optional `build:` block (all keys optional):
     steps:                       # host commands run before docker build
       - npm run build
     env_hold: .env.local         # file moved aside while steps run
+members lists the app owner plus its editors. The owner may invite another
+sharenow account by email as an editor: an editor can deploy updates (up,
+update, ship), read sql and logs, and manage env, but cannot delete, rename,
+claim, or change who has access. Billing stays with the owner.
+
 up runs steps, builds + pushes the image, pins the digest, and ships. With no
 build block it builds the folder's single Dockerfile (two or more must be
 disambiguated with build.dockerfile). A bare folder holding only worker.js
@@ -1005,6 +1013,42 @@ case "$CMD" in
     [[ "$confirm" == "$app_id" ]] || die "delete requires --confirm $app_id"
     if [[ "$dry" -eq 1 ]]; then "$JQ_BIN" -n --arg appId "$app_id" '{dryRun:true,action:"delete",appId:$appId}'; exit 0; fi
     load_account_key; api_account DELETE "$BASE_URL/api/v1/fullstack/$app_id" | "$JQ_BIN" .
+    ;;
+  members)
+    [[ $# -eq 1 ]] || die "usage: fullstack.sh members <app-id>"
+    valid_app_id "$1"; load_account_key
+    api_account GET "$BASE_URL/api/v1/fullstack/$1/members" | "$JQ_BIN" .
+    ;;
+  invite)
+    [[ $# -eq 2 ]] || die "usage: fullstack.sh invite <app-id> <email>"
+    valid_app_id "$1"
+    [[ "$2" == *@*.* && "$2" != *" "* ]] || die "invite requires a valid email address"
+    load_account_key
+    api_account POST "$BASE_URL/api/v1/fullstack/$1/members/invite" "$("$JQ_BIN" -cn --arg e "$2" '{email:$e}')" | "$JQ_BIN" .
+    ;;
+  uninvite)
+    [[ $# -eq 2 ]] || die "usage: fullstack.sh uninvite <app-id> <email|inv_...|account-id>"
+    app_id="$1"; who="$2"; valid_app_id "$app_id"; load_account_key
+    collab_base="$BASE_URL/api/v1/fullstack/$app_id"
+    # The DELETE routes answer 204 with no body; report the outcome explicitly.
+    collab_removed() { printf '{"removed":true,"kind":"%s","id":"%s"}\n' "$1" "$2"; }
+    case "$who" in
+      inv_*) api_account DELETE "$collab_base/invites/$who" >/dev/null && collab_removed invite "$who" ;;
+      *@*)
+        # An accepted member wins over a still-pending invitation for the same address.
+        resolved=$(api_account GET "$collab_base/members" | "$JQ_BIN" -r --arg e "$who" '
+          ((.members // [] | map(select((.email // "" | ascii_downcase) == ($e | ascii_downcase))) | .[0].accountId // empty | "member\t" + .),
+           (.invites // [] | map(select((.email // "" | ascii_downcase) == ($e | ascii_downcase))) | .[0].id // empty | "invite\t" + .))
+          | select(. != null)' | head -1)
+        [[ -n "$resolved" ]] || die "no member or pending invitation for $who on $app_id"
+        kind="${resolved%%$'\t'*}"; id="${resolved#*$'\t'}"
+        if [[ "$kind" == "member" ]]; then
+          api_account DELETE "$collab_base/members/$id" >/dev/null && collab_removed member "$id"
+        else
+          api_account DELETE "$collab_base/invites/$id" >/dev/null && collab_removed invite "$id"
+        fi ;;
+      *) api_account DELETE "$collab_base/members/$who" >/dev/null && collab_removed member "$who" ;;
+    esac
     ;;
   *) die "unknown command: $CMD" ;;
 esac

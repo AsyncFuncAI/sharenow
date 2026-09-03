@@ -238,6 +238,13 @@ elif [[ -d "$TARGET" ]]; then
     rel="${f#$TARGET/}"
     [[ "$rel" == ".DS_Store" ]] && continue
     [[ "$(basename "$rel")" == ".DS_Store" ]] && continue
+    case "$rel" in
+      .sharenow/data.json|.sharenow/proxy.json) ;;
+      .sharenow/*|*/.sharenow/*)
+        echo "skipping local sharenow state: $rel" >&2
+        continue
+        ;;
+    esac
     refuse_sensitive_path "$rel"
     sz=$(wc -c < "$f" | tr -d ' ')
     ct=$(guess_content_type "$f")
@@ -246,7 +253,7 @@ elif [[ -d "$TARGET" ]]; then
     FILES_JSON=$(echo "$FILES_JSON" | "$JQ_BIN" --arg p "$rel" --argjson s "$sz" --arg c "$ct" --arg h "$h" \
       '. + [{"path":$p,"size":$s,"contentType":$c,"hash":$h}]')
     FILE_MAP=$(echo "$FILE_MAP" | "$JQ_BIN" --arg p "$rel" --arg a "$abs" '. + {($p):$a}')
-  done < <(find "$TARGET" \( -type d \( -name .git -o -name .sharenow -o -name node_modules \) -prune \) -o -type f -print0 | sort -z)
+  done < <(find "$TARGET" \( -type d \( -name .git -o -name node_modules \) -prune \) -o -type f -print0 | sort -z)
 else
   die "not a file or directory: $TARGET"
 fi

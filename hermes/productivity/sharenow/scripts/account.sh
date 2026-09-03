@@ -45,12 +45,13 @@ Profile:
 
 Domains & handle:
   domains
-  domain add <domain>
+  domain add <domain> --slug S
+  domain update <domain> --slug S
   domain status <domain>
   domain rm <domain>
   handle get
-  handle create <handle> [--username U]
-  handle update <handle> [--username U]
+  handle create <handle> --slug S [--username U]
+  handle update <handle> [--slug S] [--username U]
   handle rm
 
 Links & variables:
@@ -73,6 +74,14 @@ API keys:
 Access (singular /publish/):
   access <slug>
   metadata set <slug> --json '<inline|@file>'
+
+Collaborators (owner invites editors by email; --app targets a Fullstack app):
+  members <slug> [--app <app-id>]
+  invite <slug> <email> [--app <app-id>]
+  uninvite <slug> <email|inv_...|account-id> [--app <app-id>]
+  invites                    List invitations addressed to this account
+  accept <inviteId>          Accept an invitation
+  decline <inviteId>         Decline an invitation
 USAGE
   exit "$code"
 }
@@ -412,7 +421,16 @@ case "$CMD" in
   domain)
     sub="${1:-}"; dom="${2:-}"; shift 2 || true
     case "$sub" in
-      add) [[ -n "$dom" ]] || die "domain add requires <domain>"; api_json POST "$BASE_URL/api/v1/domains" "$(jobj --arg d "$dom" '{domain:$d}')" | pp ;;
+      add|update)
+        slug=""
+        while [[ $# -gt 0 ]]; do case "$1" in --slug) slug="$2"; shift 2 ;; *) die "unknown option: $1" ;; esac; done
+        [[ -n "$dom" ]] || die "domain $sub requires <domain>"
+        [[ -n "$slug" ]] || die "domain $sub requires --slug <site-or-app-slug>"
+        if [[ "$sub" == "add" ]]; then
+          api_json POST "$BASE_URL/api/v1/domains" "$(jobj --arg d "$dom" --arg s "$slug" '{domain:$d,targetSlug:$s}')" | pp
+        else
+          api_json PATCH "$BASE_URL/api/v1/domains/$(urlenc "$dom")" "$(jobj --arg s "$slug" '{targetSlug:$s}')" | pp
+        fi ;;
       status) [[ -n "$dom" ]] || die "domain status requires <domain>"; $req GET "$BASE_URL/api/v1/domains/$(urlenc "$dom")" | pp ;;
       rm) [[ -n "$dom" ]] || die "domain rm requires <domain>"; $req DELETE "$BASE_URL/api/v1/domains/$(urlenc "$dom")" | pp ;;
       *) die "unknown domain subcommand: $sub" ;;
@@ -423,10 +441,12 @@ case "$CMD" in
     case "$sub" in
       get) $req GET "$BASE_URL/api/v1/handle" | pp ;;
       create|update)
-        h="${1:-}"; shift || true; user=""
-        while [[ $# -gt 0 ]]; do case "$1" in --username) user="$2"; shift 2 ;; *) die "unknown option: $1" ;; esac; done
+        h="${1:-}"; shift || true; user=""; slug=""
+        while [[ $# -gt 0 ]]; do case "$1" in --username) user="$2"; shift 2 ;; --slug) slug="$2"; shift 2 ;; *) die "unknown option: $1" ;; esac; done
         [[ -n "$h" ]] || die "handle $sub requires <handle>"
+        [[ "$sub" == "update" || -n "$slug" ]] || die "handle create requires --slug <site-or-app-slug>"
         body=$(jobj --arg h "$h" '{handle:$h}'); [[ -n "$user" ]] && body=$("$JQ_BIN" -n --arg u "$user" --argjson c "$body" '$c + {username:$u}')
+        [[ -n "$slug" ]] && body=$("$JQ_BIN" -n --arg s "$slug" --argjson c "$body" '$c + {targetSlug:$s}')
         meth="POST"; [[ "$sub" == "update" ]] && meth="PATCH"
         api_json "$meth" "$BASE_URL/api/v1/handle" "$body" | pp ;;
       rm) $req DELETE "$BASE_URL/api/v1/handle" | pp ;;
@@ -493,6 +513,78 @@ case "$CMD" in
     json=""; while [[ $# -gt 0 ]]; do case "$1" in --json) json="$2"; shift 2 ;; *) die "unknown option: $1" ;; esac; done
     [[ -n "$json" ]] || die "metadata set requires --json"
     api_json PATCH "$BASE_URL/api/v1/publish/$(urlenc "$slug")/metadata" "$(read_json_arg "$json")" | pp ;;
+
+  members|invite|uninvite)
+    # Collaborators: an owner invites other sharenow accounts as editors of one
+    # Site or Fullstack app. --app <app-id> selects the Fullstack target; the
+    # positional target is a Site slug otherwise. Flags may appear anywhere.
+    app=""; positional=()
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --app) [[ $# -ge 2 ]] || die "--app requires an app id"; app="$2"; shift 2 ;;
+      --*) die "unknown option: $1" ;;
+      *) positional+=("$1"); shift ;;
+    esac; done
+    set -- ${positional[@]+"${positional[@]}"}
+    if [[ -n "$app" ]]; then
+      [[ "$app" == fsa_* && "$app" != *[!A-Za-z0-9_-]* ]] || die "invalid Fullstack app id"
+      # With --app the app id is the target; a positional target is optional and
+      # must match it when given.
+      if [[ $# -gt 0 && "${1:-}" == fsa_* ]]; then
+        [[ "$1" == "$app" ]] || die "$CMD received two different app ids"
+        shift
+      fi
+      collab_base="$BASE_URL/api/v1/fullstack/$(urlenc "$app")"
+      target_label="$app"
+    else
+      slug="${1:-}"; [[ -n "$slug" ]] || die "$CMD requires <slug> (or --app <app-id>)"; shift
+      collab_base="$BASE_URL/api/v1/publish/$(urlenc "$slug")"
+      target_label="$slug"
+    fi
+    case "$CMD" in
+      members)
+        [[ $# -eq 0 ]] || die "unexpected members argument: $1"
+        $req GET "$collab_base/members" | pp ;;
+      invite)
+        email="${1:-}"; [[ -n "$email" ]] || die "invite requires <email>"; shift || true
+        [[ $# -eq 0 ]] || die "unexpected invite argument: $1"
+        [[ "$email" == *@*.* && "$email" != *" "* ]] || die "invite requires a valid email address"
+        api_json POST "$collab_base/members/invite" "$(jobj --arg e "$email" '{email:$e}')" | pp ;;
+      uninvite)
+        who="${1:-}"; [[ -n "$who" ]] || die "uninvite requires <email|inv_...|account-id>"; shift || true
+        [[ $# -eq 0 ]] || die "unexpected uninvite argument: $1"
+        # The DELETE routes answer 204 with no body; report the outcome explicitly.
+        collab_removed() { printf '{"removed":true,"kind":"%s","id":"%s"}\n' "$1" "$2"; }
+        case "$who" in
+          inv_*) $req DELETE "$collab_base/invites/$(urlenc "$who")" >/dev/null && collab_removed invite "$who" ;;
+          acc_*) $req DELETE "$collab_base/members/$(urlenc "$who")" >/dev/null && collab_removed member "$who" ;;
+          *@*)
+            # Resolve the email against this resource: an accepted member wins over
+            # a still-pending invitation with the same address.
+            listing=$($req GET "$collab_base/members")
+            resolved=$(printf '%s' "$listing" | "$JQ_BIN" -r --arg e "$who" '
+              ((.members // [] | map(select((.email // "" | ascii_downcase) == ($e | ascii_downcase))) | .[0].accountId // empty | "member\t" + .),
+               (.invites // [] | map(select((.email // "" | ascii_downcase) == ($e | ascii_downcase))) | .[0].id // empty | "invite\t" + .))
+              | select(. != null)' | head -1)
+            [[ -n "$resolved" ]] || die "no member or pending invitation for $who on $target_label"
+            kind="${resolved%%$'\t'*}"; id="${resolved#*$'\t'}"
+            if [[ "$kind" == "member" ]]; then
+              $req DELETE "$collab_base/members/$(urlenc "$id")" >/dev/null && collab_removed member "$id"
+            else
+              $req DELETE "$collab_base/invites/$(urlenc "$id")" >/dev/null && collab_removed invite "$id"
+            fi ;;
+          *) $req DELETE "$collab_base/members/$(urlenc "$who")" >/dev/null && collab_removed member "$who" ;;
+        esac ;;
+    esac ;;
+
+  invites)
+    [[ $# -eq 0 ]] || die "invites accepts no arguments"
+    $req GET "$BASE_URL/api/v1/invites" | pp ;;
+
+  accept|decline)
+    invite_id="${1:-}"; [[ -n "$invite_id" ]] || die "$CMD requires <inviteId>"; shift || true
+    [[ $# -eq 0 ]] || die "unexpected $CMD argument: $1"
+    [[ "$invite_id" == inv_* && "$invite_id" != *[!A-Za-z0-9_-]* ]] || die "invalid invitation id"
+    api_json POST "$BASE_URL/api/v1/invites/$(urlenc "$invite_id")/$CMD" "{}" | pp ;;
 
   *) die "unknown command: $CMD" ;;
 esac

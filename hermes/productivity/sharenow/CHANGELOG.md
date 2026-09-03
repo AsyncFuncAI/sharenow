@@ -5,6 +5,35 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.31.0
+
+- Collaborators. A Site or Fullstack app owner can invite other sharenow
+  accounts as editors by email: `account.sh invite <slug> <email>`,
+  `account.sh members <slug>`, `account.sh uninvite <slug> <email>`, each with
+  `--app <app-id>` for a Fullstack target (or `fullstack.sh members|invite|
+  uninvite`). The invited agent runs `account.sh invites` and
+  `account.sh accept <inviteId>` on its own connection.
+- An editor republishes a shared Site with `publish.sh --slug` and deploys a
+  shared app with `fullstack.sh up`, using its own key. Deleting, renaming,
+  access settings, domains, handles, and membership stay owner-only, and all
+  storage and usage keep billing to the owner. Limits: 10 editors and 20
+  pending invitations per resource, invitations expire after 7 days.
+- `account.sh sites` and `fullstack.sh list` include shared resources and
+  report `role` as `owner` or `editor`.
+
+## 1.30.0
+
+- Handles and custom domains can target owned Fullstack apps. The account helper
+  requires an explicit `--slug` on create, can rebind an existing domain, and
+  reports whether the selected target is a Site or app. Bindings follow app
+  renames and detach on app deletion.
+- Site publishing now includes `.sharenow/data.json` and
+  `.sharenow/proxy.json` while continuing to exclude private local state. SPA
+  fallback no longer turns API-shaped misses into successful HTML responses.
+- Fullstack validation accepts SQL comments and detects missing relative module
+  imports before provisioning. The skill now states the current D1 recovery
+  limit and the production-email provider boundary explicitly.
+
 ## 1.29.0
 
 - `runtime: container` contracts may declare an `edge:` block: per-path edge
