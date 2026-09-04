@@ -68,6 +68,8 @@ command -v curl >/dev/null 2>&1 || die "requires curl. Install it with 'brew ins
 # call http_handle_response today; the source keeps lib/http.sh present in every
 # script's SCRIPT_DIR and available if publish's flow is later unified.
 . "$SCRIPT_DIR/lib/http.sh"
+# The source stamp and the stale refusal (git source of truth, R11/R12).
+. "$SCRIPT_DIR/lib/source.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -241,7 +243,9 @@ elif [[ -d "$TARGET" ]]; then
     case "$rel" in
       .sharenow/data.json|.sharenow/proxy.json) ;;
       .sharenow/*|*/.sharenow/*)
-        echo "skipping local sharenow state: $rel" >&2
+        # Not site content: the version stamp and other local state stay in
+        # the folder and are what the freshness check reads.
+        echo "not publishing $rel (sharenow's local state, kept in the folder)" >&2
         continue
         ;;
     esac
@@ -283,6 +287,46 @@ if [[ "$SPA_MODE" == "true" ]]; then
   BODY=$(echo "$BODY" | "$JQ_BIN" '.spaMode = true')
 fi
 
+# Freshness (R11, R12). A folder pulled with `account.sh pull` carries a stamp
+# naming the live version it was built from. Sending it turns this publish into
+# a claim ("I am building on that version"), which sharenow refuses BEFORE
+# staging anything if someone else has published since.
+#
+# Two guards on making the claim at all:
+#  - the stamp must belong to THIS slug, or a folder pulled for one Site would
+#    refuse a deliberate publish to another;
+#  - no stamp means no claim, so a folder that predates this feature, or one an
+#    agent assembled itself, publishes exactly as it always did (AE6).
+EXPECTED_VERSION=""
+STAMP_DIR=""
+if [[ -d "$TARGET" ]]; then
+  STAMP_DIR="$TARGET"
+elif [[ -f "$TARGET" ]]; then
+  STAMP_DIR="$(dirname "$TARGET")"
+fi
+if [[ -n "$STAMP_DIR" && -n "$SLUG" ]]; then
+  STAMP_SLUG="$(source_stamp_slug "$STAMP_DIR")"
+  if [[ "$STAMP_SLUG" == "$SLUG" ]]; then
+    EXPECTED_VERSION="$(source_stamp_version "$STAMP_DIR")"
+  fi
+fi
+if [[ -n "$EXPECTED_VERSION" ]]; then
+  BODY=$(echo "$BODY" | "$JQ_BIN" --arg v "$EXPECTED_VERSION" '.expectedVersion = $v')
+fi
+
+# The stale refusal, at either step. Exit 3 is the contract: an agent branches
+# on it to mean "someone else published", distinct from auth (1), validation
+# (1), and network (1) failures, so it never has to parse prose.
+refuse_if_stale() {
+  local response="$1" mine live pair
+  source_response_is_stale "$response" || return 0
+  pair="$(source_stale_versions "$response")"
+  mine="${pair%%$'\t'*}"; live="${pair#*$'\t'}"
+  [[ -n "$mine" ]] || mine="$EXPECTED_VERSION"
+  source_stale_message "${SLUG:-this Site}" "$TARGET" "$mine" "$live"
+  exit 3
+}
+
 # Determine endpoint and method
 if [[ -n "$SLUG" ]]; then
   URL="$BASE_URL/api/v1/publish/$SLUG"
@@ -315,7 +359,9 @@ RESPONSE=$(curl_publish -sS -X "$METHOD" "$URL" \
   -H "content-type: application/json" \
   -d "$BODY")
 
-# Check for errors
+# Check for errors. The stale refusal is checked FIRST and separately: it is the
+# one failure with its own exit code, and nothing has been uploaded yet.
+refuse_if_stale "$RESPONSE"
 if echo "$RESPONSE" | "$JQ_BIN" -e '.error' >/dev/null 2>&1; then
   err=$(echo "$RESPONSE" | "$JQ_BIN" -r '.error')
   details=$(echo "$RESPONSE" | "$JQ_BIN" -r '.details // empty')
@@ -389,12 +435,23 @@ fi
 [[ "$upload_errors" -eq 0 ]] || die "$upload_errors file(s) failed to upload"
 
 # Step 3: Finalize
+#
+# The freshness claim rides along again, but the server's authority for the flip
+# is the value it persisted at create: finalize compares and sets the live
+# pointer, so a second editor who staged from the same version between our
+# create and this call takes the flip and we are refused here instead. Same
+# message, same exit code, and the uploaded bytes are simply never made live.
 echo "finalizing..." >&2
+FIN_BODY=$("$JQ_BIN" -n --arg v "$VERSION_ID" '{versionId:$v}')
+if [[ -n "$EXPECTED_VERSION" ]]; then
+  FIN_BODY=$(echo "$FIN_BODY" | "$JQ_BIN" --arg e "$EXPECTED_VERSION" '.expectedVersion = $e')
+fi
 FIN_RESPONSE=$(curl_publish -sS -X POST "$FINALIZE_URL" \
   "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
   -H "content-type: application/json" \
-  -d "{\"versionId\":\"$VERSION_ID\"}")
+  -d "$FIN_BODY")
 
+refuse_if_stale "$FIN_RESPONSE"
 if echo "$FIN_RESPONSE" | "$JQ_BIN" -e '.error' >/dev/null 2>&1; then
   err=$(echo "$FIN_RESPONSE" | "$JQ_BIN" -r '.error')
   die "finalize failed: $err"
@@ -445,6 +502,14 @@ echo "" >&2
 echo "publish_result.site_url=$SITE_URL" >&2
 echo "publish_result.slug=$OUT_SLUG" >&2
 echo "publish_result.action=$ACTION" >&2
+# The folder now IS the live version. Advance its stamp so the next publish
+# from this same folder is not refused as stale by the very version it made.
+# Only a folder that already carried a stamp for this slug gets one; a plain
+# folder keeps deploying exactly as before.
+if [[ -n "${STAMP_DIR:-}" && -n "${EXPECTED_VERSION:-}" && -n "${VERSION_ID:-}" && "${STAMP_SLUG:-}" == "$OUT_SLUG" ]]; then
+  source_write_stamp "$STAMP_DIR" site "$OUT_SLUG" "$VERSION_ID" || true
+fi
+
 echo "publish_result.auth_mode=$AUTH_MODE" >&2
 echo "publish_result.api_key_source=$API_KEY_SOURCE" >&2
 echo "publish_result.persistence=$PERSISTENCE" >&2

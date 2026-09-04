@@ -640,6 +640,7 @@ expected_installed_files="$(printf '%s\n' \
   './scripts/fullstack.sh' \
   './scripts/kb.sh' \
   './scripts/lib/http.sh' \
+  './scripts/lib/source.sh' \
   './scripts/publish.sh' \
   './scripts/version.sh' \
   './templates/loop-crm/README.md' \

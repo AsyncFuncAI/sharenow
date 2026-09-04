@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.31.0**
+**Skill version: 1.32.1**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -201,6 +201,92 @@ Site costs the editor nothing.
 Limits per resource: 10 editors and 20 pending invitations. `account.sh sites`
 and `fullstack.sh list` include shared resources and report `role` as `owner`
 or `editor`; check it before promising an action the user cannot take.
+
+## Working on a shared Site or app
+
+When the user is an editor of someone else's Site or app, do not ask the owner
+for the files. Pull them:
+
+```bash
+./scripts/account.sh pull <slug> ./work          # a Site
+./scripts/account.sh pull --app <app-id> ./work  # a Fullstack app
+```
+
+`pull` writes the live files into the folder plus a stamp at
+`.sharenow/source.json` naming the version they came from. Edit the folder and
+publish from it as normal: `./scripts/publish.sh ./work --slug <slug>` for a
+Site, `./scripts/fullstack.sh up ./work` for an app. The stamp travels with the
+deploy, so sharenow can tell whether the folder is still current, and a
+successful publish advances it: keep editing and publishing from the same
+folder for as long as nobody else publishes in between.
+
+**Exit code 3 means someone else published first.** The deploy was refused
+before anything was uploaded and nothing in the folder was touched. Do not
+retry it and do not force it; there is no force. Pull the newer version into a
+second folder, carry the edits across, and publish again:
+
+```bash
+./scripts/account.sh pull <slug> ./work-latest
+# copy the changes from ./work into ./work-latest, then
+./scripts/publish.sh ./work-latest --slug <slug>
+```
+
+`pull` also refuses with exit 3 when the target folder holds edits made since
+its own stamp, so a refresh never eats uncommitted work. Pull alongside, or
+pass `--force` to discard the local changes deliberately.
+
+**Exit code 4 means the source is not available yet.** For an app, sharenow
+records the deployed folder shortly after `up` returns, so a pull that lands in
+that window says the deploy is still being recorded; wait a minute and retry.
+If it says no source was recorded at all, the deploy never sent one and the
+person who deployed needs to run `fullstack.sh up` again.
+
+Check where things stand at any time:
+
+```bash
+./scripts/account.sh status <slug>
+```
+
+It prints the machine-readable payload on stdout (live version, last commit,
+the head of `main`, `agree`, any pending or failed recording, the newest git
+push and its state, the clone URL) and one human line on stderr. `agree: false` means the live
+version has not been recorded yet, or a git push is still deploying or was
+refused; the human line says which.
+
+Roll back the last deploy, as owner or editor:
+
+```bash
+./scripts/account.sh undo <slug>
+./scripts/account.sh undo <slug> --to <commit>
+```
+
+`undo` queues the rollback and returns at once with the target commit; the
+site changes within about a minute. Watch it land with `status`. The undo is
+itself a new deploy and a new commit, so history stays linear, and a repeated
+undo to the same target does nothing.
+
+For a user who prefers git, every Site and app has a private repo. Take the
+clone URL from `status` rather than composing one; the sharenow API key is the
+password:
+
+```bash
+./scripts/account.sh status <slug> | jq -r .cloneUrl
+git clone "$(./scripts/account.sh status <slug> 2>/dev/null | jq -r .cloneUrl)"
+```
+
+Pushing to `main` deploys, with the same validation and limits as a script
+deploy, billed to the owner. `main` is one linear deploy history: the remote
+refuses a force push or a delete of `main` (`rejected by rule 'main-linear'`),
+so a stale clone gets the ordinary non-fast-forward rejection and recovers with
+`git pull --rebase`. A push answered with HTTP 503 means the last deploy is
+still being recorded; wait a few seconds and push again. A push that fails
+validation (a symlink, a secret-looking
+path, a folder over the limit) is not deployed and the live site is unchanged;
+`status` then says `Push <commit> was refused` and why, until the next good
+push. Every deploy is a commit, script publishes included, so `git log` is the
+full deploy history. Container apps are recorded only: a push does not rebuild
+them, so they still need a local `fullstack.sh up`. Nobody outside the owner
+and editors can tell the repo exists.
 
 ## Private Drive
 

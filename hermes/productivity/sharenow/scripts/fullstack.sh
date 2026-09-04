@@ -94,6 +94,8 @@ command -v curl >/dev/null 2>&1 || die "requires curl"
 command -v shasum >/dev/null 2>&1 || die "requires shasum"
 command -v file >/dev/null 2>&1 || die "requires file"
 . "$SCRIPT_DIR/lib/http.sh"
+# The source stamp and the stale refusal (git source of truth, R11/R12).
+. "$SCRIPT_DIR/lib/source.sh"
 
 valid_account_key() { [[ "$1" == snk_????????????????????* && "$1" != *[!A-Za-z0-9_-]* ]]; }
 load_account_key() {
@@ -113,6 +115,35 @@ api_account() {
     fi
   else
     code=$(printf 'header = "authorization: Bearer %s"\n' "$API_KEY" | curl --config - -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url")
+  fi
+  http_handle_response "$code" "$tmp"
+}
+
+# The freshness-aware app update (R11, R12, KTD2).
+#
+# `api_account` dies on any non-2xx, which would flatten the stale refusal into
+# a generic exit 1. This wrapper keeps the response so the ONE failure that has
+# its own exit code can keep it: 3 means "someone else deployed", distinct from
+# auth, validation, and network failures.
+#
+# The claim itself is the stamp's version, which for an app is the deploy
+# sequence number `up` last pulled. No stamp means no claim, and an app deployed
+# from a folder that never pulled behaves exactly as it always did.
+api_update_app() {
+  local url="$1" body="$2" expected="$3" root="$4" label="$5" tmp code mine live pair
+  if [[ -n "$expected" ]]; then
+    body=$(printf '%s' "$body" | "$JQ_BIN" -c --arg v "$expected" '.expectedVersion = $v')
+  fi
+  tmp=$(mktemp)
+  code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") \
+    -sS -o "$tmp" -w "%{http_code}" -X PUT "$url" -H "content-type: application/json" --data-binary @-)
+  if source_response_is_stale "$tmp"; then
+    pair="$(source_stale_versions "$tmp")"
+    mine="${pair%%$'\t'*}"; live="${pair#*$'\t'}"
+    [[ -n "$mine" ]] || mine="$expected"
+    rm -f "$tmp"
+    source_stale_message "$label" "$root" "$mine" "$live"
+    exit 3
   fi
   http_handle_response "$code" "$tmp"
 }
@@ -307,6 +338,151 @@ stage_project_file() {
   code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT "$upload_url" -H "content-type: $content_type" --data-binary "@$root/$rel")
   [[ "$code" -ge 200 && "$code" -lt 300 ]] || die "Drive upload failed for $rel (HTTP $code)"
   api_account POST "$BASE_URL/api/v1/drives/$drive_id/files/finalize" "$("$JQ_BIN" -n --arg uploadId "$upload_id" '{uploadId:$uploadId}')" >/dev/null
+}
+
+# ── Source snapshot (git source of truth, KTD6) ──────────────────────────────
+#
+# After a deploy succeeds, sharenow hands back a one-time `source` grant
+# {deploySeq, sourceToken}. These helpers turn the deployed-from folder into a
+# content-addressed snapshot bound to THAT deploy, so the app's repo holds the
+# real source instead of just the contract.
+#
+# The hard rule: none of this may ever fail `up`. The app is already live by the
+# time any of it runs, so every failure path prints one `source: ...` line and
+# returns 0. That is why `api_source` exists at all - `api_account` calls `die`.
+
+# Non-fatal JSON API call. Prints the body on 2xx and returns 0; on anything
+# else prints nothing and returns 1, leaving the caller to decide (which for the
+# snapshot is always "print a note and carry on").
+api_source() {
+  local method="$1" url="$2" body="${3:-}" tmp code
+  tmp=$(mktemp)
+  if [[ -n "$body" ]]; then
+    code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "content-type: application/json" --data-binary @- 2>/dev/null) || code=000
+  else
+    code=$(printf 'header = "authorization: Bearer %s"\n' "$API_KEY" | curl --config - -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" 2>/dev/null) || code=000
+  fi
+  if [[ "$code" -ge 200 && "$code" -lt 300 ]]; then
+    cat "$tmp"; rm -f "$tmp"; return 0
+  fi
+  # Surface the server's own reason (source_not_open, snapshot_too_large, ...)
+  # on stderr through the caller, not here: this returns it as the body so the
+  # caller can put it in the one `source:` line the agent reads.
+  "$JQ_BIN" -r '.code // empty' "$tmp" 2>/dev/null >&2 || true
+  rm -f "$tmp"
+  return 1
+}
+
+# The SNAPSHOT walk. Wider than `project_manifest` in two ways, on purpose:
+# container apps are included (their source is worth committing even though only
+# fullstack.yaml is staged for the deploy), and declared build output is skipped
+# because it is regenerated from the source we do commit. Same secret refusal.
+snapshot_manifest() {
+  local root="$1" manifest='[]' count=0 total=0 file_path rel size sha
+  while IFS= read -r -d '' file_path; do
+    rel="${file_path#"$root"/}"
+    case "$rel" in
+      .git/*|*/.git/*|node_modules/*|*/node_modules/*|.sharenow/*|*/.sharenow/*) continue ;;
+      dist/*|*/dist/*|.next/*|*/.next/*|build/*|*/build/*|out/*|*/out/*|target/*|*/target/*) continue ;;
+      .DS_Store|*/.DS_Store) continue ;;
+    esac
+    [[ "$rel" != *$'\n'* && "$rel" != /* && "$rel" != *../* && "$rel" != ../* ]] || continue
+    # A credential in the folder means we record NOTHING: a commit that quietly
+    # omitted it would differ from what was deployed, which is the drift this
+    # feature exists to prevent. The server refuses such a manifest too.
+    if is_sensitive_path "$rel"; then
+      printf 'SECRET\t%s\n' "$rel"
+      return 0
+    fi
+    size=$(wc -c < "$file_path" | tr -d '[:space:]')
+    [[ "$size" -le 20971520 ]] || { printf 'TOO_LARGE\n'; return 0; }
+    count=$((count + 1)); total=$((total + size))
+    if [[ "$count" -gt 2000 || "$total" -gt 209715200 ]]; then
+      printf 'TOO_LARGE\n'
+      return 0
+    fi
+    sha=$(file_sha "$file_path")
+    manifest=$(printf '%s' "$manifest" | "$JQ_BIN" -c --arg path "$rel" --arg sha "$sha" --argjson size "$size" '. + [{path:$path,sha256:$sha,size:$size}]')
+  done < <(find "$root" -type f -print0 2>/dev/null | sort -z)
+  [[ "$count" -gt 0 ]] || { printf 'EMPTY\n'; return 0; }
+  printf 'OK\t%s\n' "$(printf '%s' "$manifest" | "$JQ_BIN" -c 'sort_by(.path)')"
+}
+
+# The yaml-only fallback a folder past the cap sends instead (KTD6).
+snapshot_yaml_only() {
+  local root="$1" size sha
+  [[ -f "$root/fullstack.yaml" ]] || return 1
+  size=$(wc -c < "$root/fullstack.yaml" | tr -d '[:space:]')
+  sha=$(file_sha "$root/fullstack.yaml")
+  "$JQ_BIN" -n --arg sha "$sha" --argjson size "$size" '[{path:"fullstack.yaml",sha256:$sha,size:$size}]'
+}
+
+# Send the folder as this deploy's source. Prints exactly one `source: ...`
+# line and ALWAYS returns 0 - `up` has already shipped a live app and must not
+# report failure because bookkeeping did not land.
+send_source_snapshot() {
+  local app_id="$1" root="$2" deploy_seq="$3" token="$4"
+  local walked kind manifest reason body plan snapshot_id uploads count i entry url path code fin record_id
+
+  walked=$(snapshot_manifest "$root") || { echo "source: not recorded (could not read the folder)"; return 0; }
+  kind="${walked%%$'\t'*}"
+  case "$kind" in
+    SECRET)
+      echo "source: not recorded (a credential file is in the folder: ${walked#*$'\t'})"
+      return 0 ;;
+    EMPTY)
+      echo "source: not recorded (no recordable files)"
+      return 0 ;;
+    TOO_LARGE)
+      manifest=$(snapshot_yaml_only "$root") || { echo "source: not recorded (folder over the snapshot cap)"; return 0; }
+      reason="too_large" ;;
+    OK)
+      manifest="${walked#*$'\t'}"
+      reason="" ;;
+    *)
+      echo "source: not recorded (unexpected snapshot state)"
+      return 0 ;;
+  esac
+
+  if [[ -n "$reason" ]]; then
+    body=$("$JQ_BIN" -cn --arg seq "$deploy_seq" --arg token "$token" --argjson manifest "$manifest" --arg reason "$reason" \
+      '{deploySeq:$seq,sourceToken:$token,manifest:$manifest,reason:$reason}')
+  else
+    body=$("$JQ_BIN" -cn --arg seq "$deploy_seq" --arg token "$token" --argjson manifest "$manifest" \
+      '{deploySeq:$seq,sourceToken:$token,manifest:$manifest}')
+  fi
+  plan=$(api_source POST "$BASE_URL/api/v1/fullstack/$app_id/source" "$body" 2>/dev/null) || {
+    echo "source: not recorded (the server did not open a snapshot for this deploy)"
+    return 0
+  }
+  snapshot_id=$(printf '%s' "$plan" | "$JQ_BIN" -r '.snapshotId // empty')
+  [[ -n "$snapshot_id" ]] || { echo "source: not recorded (no snapshot id)"; return 0; }
+
+  count=$(printf '%s' "$plan" | "$JQ_BIN" '.uploads | length')
+  i=0
+  while [[ "$i" -lt "$count" ]]; do
+    entry=$(printf '%s' "$plan" | "$JQ_BIN" -c --argjson i "$i" '.uploads[$i]')
+    url=$(printf '%s' "$entry" | "$JQ_BIN" -r '.url')
+    path=$(printf '%s' "$entry" | "$JQ_BIN" -r '.path')
+    code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT "$url" -H "content-type: application/octet-stream" --data-binary "@$root/$path" 2>/dev/null) || code=000
+    if [[ "$code" -lt 200 || "$code" -ge 300 ]]; then
+      echo "source: not recorded (upload failed for $path)"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+
+  fin=$(api_source POST "$BASE_URL/api/v1/fullstack/$app_id/source/$snapshot_id/finalize" '{}' 2>/dev/null) || {
+    echo "source: not recorded (the snapshot did not finalize)"
+    return 0
+  }
+  record_id=$(printf '%s' "$fin" | "$JQ_BIN" -r '.recordId // empty')
+  if [[ -n "$reason" ]]; then
+    echo "source: pending (${record_id:-recorded}) - folder over the snapshot cap, contract only"
+  else
+    echo "source: pending (${record_id:-recorded})"
+  fi
+  return 0
 }
 
 remote_validate() {
@@ -562,6 +738,12 @@ case "$CMD" in
     [[ -n "$url" ]] && valid_branded_url "$url" || die "invalid Fullstack live URL"
     api_account POST "$BASE_URL/api/v1/fullstack/$app_id/claim" "$($JQ_BIN -n --arg token "$claim_token" '{token:$token}')" >/dev/null
     unset claim_token created
+    # The per-deploy source grant for a SPAWN lives on the status route, not on
+    # the create response: a spawn returns while the app is still provisioning.
+    # Read it only NOW, after the claim - the grant is a write credential for the
+    # app's source, so the server hands it to an account with a role on the app,
+    # which this caller does not have until the claim lands.
+    source_grant=$(api_account GET "$BASE_URL/api/v1/fullstack/$app_id/status" 2>/dev/null | "$JQ_BIN" -c '.source // empty' 2>/dev/null || true)
     install_canonical_secrets "$app_id" "$secrets_file"
     staging_drive="not_applicable"
     if [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project ]]; then
@@ -589,9 +771,11 @@ case "$CMD" in
         | "$JQ_BIN" -c '[.container.lines // [] | .[-12:][] | .level + " " + .message]' 2>/dev/null) || boot_log="[]"
       [[ -n "$boot_log" ]] || boot_log="[]"
     fi
+    [[ -n "${source_grant:-}" ]] || source_grant="null"
     "$JQ_BIN" -n --arg appId "$app_id" --arg state "$state" --arg url "$url" --arg addressState "$address_state" --arg stagingDrive "$staging_drive" \
-      --arg runtime "$deploy_runtime" --argjson bootLog "$boot_log" \
+      --arg runtime "$deploy_runtime" --argjson bootLog "$boot_log" --argjson source "$source_grant" \
       '{appId:$appId,state:$state,persistence:"permanent",addressState:$addressState,stagingDrive:$stagingDrive}
+      + (if $source == null then {} else {source:$source} end)
       + (if $runtime == "container" then {bootLog:$bootLog} else {} end)
       + (if $addressState == "ready" then {url:$url}
          elif $addressState == "propagating" then {next:("The app is permanent. Its address is still finishing. Run fullstack.sh status " + $appId + " in a few seconds.")}
@@ -634,7 +818,17 @@ case "$CMD" in
     contract_path=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.contractPath')
     yaml=$(cat "$contract_path")
     body=$($JQ_BIN -n --arg yaml "$yaml" --arg driveId "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')" --argjson manifest "$(printf '%s' "$receipt" | "$JQ_BIN" -c '.manifest')" --argjson env "$env_json" '{yaml:$yaml,driveId:$driveId,manifest:$manifest,env:$env}')
-    updated=$(api_account PUT "$BASE_URL/api/v1/fullstack/$app_id" "$body")
+    # The freshness claim comes from the stamp in the folder this plan was
+    # prepared from, and only when that stamp names THIS app: a folder pulled
+    # for one app must not silently vouch for another.
+    update_root=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.projectRoot // empty')
+    update_expected=""
+    if [[ -n "$update_root" && -d "$update_root" ]]; then
+      if [[ "$(source_stamp_slug "$update_root")" == "$app_id" ]]; then
+        update_expected="$(source_stamp_version "$update_root")"
+      fi
+    fi
+    updated=$(api_update_app "$BASE_URL/api/v1/fullstack/$app_id" "$body" "$update_expected" "${update_root:-$PWD}" "$app_id")
     unset body env_json yaml validation
     [[ "$(printf '%s' "$updated" | "$JQ_BIN" -r '.appId // empty')" == "$app_id" ]] || die "Fullstack update response changed the app id"
     [[ "$(printf '%s' "$updated" | "$JQ_BIN" -r '.updated // false')" == true ]] || die "Fullstack update did not confirm success"
@@ -831,7 +1025,15 @@ case "$CMD" in
       fi
     fi
     [[ -z "$up_secrets" ]] || up_ship_args+=(--secrets-from "$up_secrets")
-    up_receipt=$("$0" ship "$up_folder" ${up_ship_args[@]+"${up_ship_args[@]}"}) || die "up failed at ship"
+    # `ship` already printed the refusal; exit 3 is a contract an agent branches
+    # on, so it must survive the subshell rather than being flattened into the
+    # generic exit 1 that `die` produces.
+    up_ship_rc=0
+    up_receipt=$("$0" ship "$up_folder" ${up_ship_args[@]+"${up_ship_args[@]}"}) || up_ship_rc=$?
+    if [[ "$up_ship_rc" -ne 0 ]]; then
+      [[ "$up_ship_rc" -ne 3 ]] || exit 3
+      die "up failed at ship"
+    fi
 
     # 5. Write the identity back on first create so the next up updates.
     up_new_id=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.appId // empty')
@@ -852,10 +1054,32 @@ case "$CMD" in
     if [[ -n "$up_note_id" && -n "$up_yaml_slug" && -n "$up_live_slug" && "$up_yaml_slug" != "$up_live_slug" ]]; then
       echo "==> note: contract says slug: $up_yaml_slug but the live app is $up_live_slug; up never renames - run 'rename $up_note_id $up_yaml_slug' if the move is intended, or update the contract's slug to match" >&2
     fi
-    if [[ -n "$up_app_id" ]]; then
-      printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"updated"}'
+    # 6. Send the deployed-from folder as this deploy's source (KTD6, R2).
+    #
+    # The app is already live; this is bookkeeping that makes the resource's repo
+    # hold real source instead of just a contract. It runs AFTER the app_id
+    # write-back so the freshly written `app_id:` line is part of what gets
+    # recorded, and it can NEVER fail `up`: every path inside prints one
+    # `source: ...` line to stderr and returns 0.
+    up_target_id="${up_app_id:-$up_new_id}"
+    up_seq=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.source.deploySeq // empty')
+    up_token=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.source.sourceToken // empty')
+    if [[ -z "$up_target_id" ]]; then
+      echo "source: not recorded (no app id)" >&2
+    elif [[ -z "$up_seq" || -z "$up_token" ]]; then
+      # An older server (or a deploy that could not open a window) sends no
+      # grant. Say so plainly rather than leaving the agent to wonder.
+      echo "source: not recorded (no source window)" >&2
     else
-      printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"created"}'
+      load_account_key
+      send_source_snapshot "$up_target_id" "$up_folder" "$up_seq" "$up_token" >&2 || true
+    fi
+    unset up_token
+
+    if [[ -n "$up_app_id" ]]; then
+      printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"updated"} | del(.source)'
+    else
+      printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"created"} | del(.source)'
     fi
     ;;
   ship)

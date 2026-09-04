@@ -82,6 +82,11 @@ Collaborators (owner invites editors by email; --app targets a Fullstack app):
   invites                    List invitations addressed to this account
   accept <inviteId>          Accept an invitation
   decline <inviteId>         Decline an invitation
+
+Source (shared Sites and apps; --app targets a Fullstack app):
+  pull <slug> <dir> [--force]   Fetch the live version into <dir> and stamp it
+  status <slug>                 Live version, last commit, whether they agree
+  undo <slug> [--to <commit>]   Redeploy the previous recorded commit
 USAGE
   exit "$code"
 }
@@ -295,6 +300,9 @@ command -v curl >/dev/null 2>&1 || die "requires curl"
 
 # Shared HTTP response handling (needs JQ_BIN + die, both defined above).
 . "$SCRIPT_DIR/lib/http.sh"
+# The source stamp and its messages (pull/status/undo, and the stale refusal
+# publish.sh renders from the same wording).
+. "$SCRIPT_DIR/lib/source.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -574,6 +582,227 @@ case "$CMD" in
             fi ;;
           *) $req DELETE "$collab_base/members/$(urlenc "$who")" >/dev/null && collab_removed member "$who" ;;
         esac ;;
+    esac ;;
+
+  pull|status|undo)
+    # Source verbs. A Site is addressed by slug and a Fullstack app by
+    # --app <app-id>; both resolve to the same three endpoints under
+    # `.../source`, so the target resolution is shared and only the verb differs.
+    #
+    # Exit codes are a contract agents branch on, so they are deliberate:
+    #   3  the folder is behind the live version, or would be overwritten
+    #   4  the source is not available yet (pending) or was never recorded
+    #   5  the export could not be unpacked safely
+    # Everything else stays 1 via `die`, as in every other verb.
+    src_app=""; src_force=0; src_to=""; src_positional=()
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --help|-h)
+        case "$CMD" in
+          pull) echo "Usage: account.sh pull <slug> <dir> | pull --app <app-id> <dir>  [--force]"
+                echo "  Fetches the live files into <dir> with a version stamp. Exit 3: <dir> has newer local edits (pass --force to discard). Exit 4: source not recorded yet." ;;
+          status) echo "Usage: account.sh status <slug> | status --app <app-id>"
+                  echo "  JSON on stdout (live, recorded, pending, push, agree, cloneUrl); one human line on stderr." ;;
+          undo) echo "Usage: account.sh undo <slug> [--to <commit>] | undo --app <app-id> [--to <commit>]"
+                echo "  Queues a redeploy of the previous recorded commit (or <commit>). It goes live within about a minute; watch with: account.sh status <slug>." ;;
+        esac; exit 0 ;;
+      --app) [[ $# -ge 2 ]] || die "--app requires an app id"; src_app="$2"; shift 2 ;;
+      --force) src_force=1; shift ;;
+      --to) [[ $# -ge 2 ]] || die "--to requires a commit id"; src_to="$2"; shift 2 ;;
+      --*) die "unknown option: $1" ;;
+      *) src_positional+=("$1"); shift ;;
+    esac; done
+    set -- ${src_positional[@]+"${src_positional[@]}"}
+    if [[ -n "$src_app" ]]; then
+      [[ "$src_app" == fsa_* && "$src_app" != *[!A-Za-z0-9_-]* ]] || die "invalid Fullstack app id"
+      # A positional app id alongside --app is accepted when it agrees, the same
+      # way the collaborator verbs treat it.
+      if [[ $# -gt 0 && "${1:-}" == fsa_* ]]; then
+        [[ "$1" == "$src_app" ]] || die "$CMD received two different app ids"
+        shift
+      fi
+      src_base="$BASE_URL/api/v1/fullstack/$(urlenc "$src_app")/source"
+      src_label="$src_app"
+      src_kind="fullstack"
+    else
+      src_slug="${1:-}"
+      [[ -n "$src_slug" ]] || die "$CMD requires <slug> (or --app <app-id>)"
+      shift
+      src_base="$BASE_URL/api/v1/publish/$(urlenc "$src_slug")/source"
+      src_label="$src_slug"
+      src_kind="site"
+    fi
+
+    case "$CMD" in
+      status)
+        [[ $# -eq 0 ]] || die "unexpected status argument: $1"
+        [[ "$src_force" -eq 0 ]] || die "status does not accept --force"
+        [[ -z "$src_to" ]] || die "status does not accept --to"
+        # The payload goes to stdout VERBATIM so a caller can pipe it to jq; the
+        # human sentence goes to stderr so it never corrupts that stream.
+        src_status=$($req GET "$src_base")
+        printf '%s\n' "$src_status"
+        printf '%s' "$src_status" | "$JQ_BIN" -r '
+          def short: if . == null or . == "" then "none" else .[0:10] end;
+          def state:
+            if .push != null and .push.state == "failed" then "\(if .push.mine then "Your" else "A teammate'"'"'s" end) git push \(.push.commit | short) was refused: \(.push.error // .push.reason // "validation failed"); the live site is unchanged"
+            elif .push != null and (.push.state == "received" or .push.state == "deploying") then "Deploying \(if .push.mine then "your" else "a teammate'"'"'s" end) git push \(.push.commit | short), live within about a minute"
+            elif .pending != null and (.pending.state == "failed") then "Not recorded"
+            elif .pending != null then "Recording"
+            elif .agree then "In sync"
+            elif .head != null and .recorded != null and .head != .recorded.commit then "Out of sync: main is at \(.head | short) but the last recorded deploy is \(.recorded.commit | short)"
+            elif .recorded == null then "Not recorded"
+            else "Out of sync" end;
+          "\(.slug): live \(.live.version // "none") · commit \(.recorded.commit | short) · \(state)"
+        ' >&2 ;;
+
+      undo)
+        [[ $# -eq 0 ]] || die "unexpected undo argument: $1"
+        [[ "$src_force" -eq 0 ]] || die "undo does not accept --force"
+        if [[ -n "$src_to" ]]; then
+          [[ "$src_to" =~ ^[0-9a-f]{40}$ ]] || die "--to requires a 40-character commit id"
+          src_undo=$(api_json POST "$src_base/undo" "$(jobj --arg t "$src_to" '{target:$t}')")
+        else
+          src_undo=$(api_json POST "$src_base/undo" "{}")
+        fi
+        printf '%s\n' "$src_undo" | pp
+        # The payload is a queue receipt, not a result: say what happens next
+        # and how to watch it, so nobody reads a bare commit id as "done".
+        printf '%s' "$src_undo" | "$JQ_BIN" -r --arg target "$src_label" --arg flag "$([[ -n "$src_app" ]] && echo "--app " || true)" '
+          if .queued then "Rolling back to commit \(.target[0:10]). It goes live within about a minute; watch it with: ./scripts/account.sh status \($flag)\($target)"
+          else "Nothing to do: a rollback to commit \(.target[0:10]) is already queued or live." end
+        ' >&2 ;;
+
+      pull)
+        src_dir="${1:-}"
+        [[ -n "$src_dir" ]] || die "pull requires <dir>"
+        shift || true
+        [[ $# -eq 0 ]] || die "unexpected pull argument: $1"
+        [[ -z "$src_to" ]] || die "pull does not accept --to"
+
+        # Refuse BEFORE the download when the folder holds work newer than its
+        # stamp. Overwriting an editor's uncommitted edits with a "refresh" is
+        # the same class of loss the stale refusal exists to prevent, so it gets
+        # the same exit code and the same explicit opt-out.
+        if [[ -d "$src_dir" && "$src_force" -eq 0 ]]; then
+          src_stamp_file="$(source_stamp_path "$src_dir")"
+          if [[ -f "$src_stamp_file" && -n "$(source_stamp_version "$src_dir")" ]]; then
+            # Anything modified after the stamp was written, excluding the
+            # caches nobody edits by hand. The reference is the STAMP FILE
+            # itself, not a timestamp parsed out of it: `find -newer <file>` is
+            # portable everywhere, while `-newermt` is GNU-only and `touch -t`
+            # reads LOCAL time, either of which quietly turns this check into a
+            # no-op on the wrong platform. `pull` writes the stamp last, so its
+            # mtime is exactly "when this folder was pulled".
+            src_newer=$(find "$src_dir" \
+              \( -type d \( -name .git -o -name node_modules -o -name .sharenow \) -prune \) -o \
+              -type f -newer "$src_stamp_file" -print 2>/dev/null | head -5 || true)
+            if [[ -n "$src_newer" ]]; then
+              {
+                echo "$src_dir has local changes newer than the version it was pulled at."
+                echo "Nothing was downloaded and nothing in $src_dir was changed."
+                printf '%s\n' "$src_newer" | sed 's/^/  changed: /'
+                echo "Next: pull the newer version alongside: ./scripts/account.sh pull $src_label $(source_sibling_dir "$src_dir"), or pass --force to discard the local changes."
+              } >&2
+              exit 3
+            fi
+          elif [[ -e "$src_stamp_file" ]]; then
+            echo "$src_dir has a stamp that cannot be read; pass --force to overwrite it." >&2
+            exit 3
+          fi
+        fi
+
+        src_tar=$(mktemp "${TMPDIR:-/tmp}/sharenow-export.XXXXXX")
+        src_err=$(mktemp "${TMPDIR:-/tmp}/sharenow-export-err.XXXXXX")
+        src_headers=$(mktemp "${TMPDIR:-/tmp}/sharenow-export-hdr.XXXXXX")
+        # `-D` writes the response headers: the stamp is built from
+        # x-sharenow-version / x-sharenow-commit, which is what binds the folder
+        # to the live version rather than to whatever the recorder holds.
+        src_code=$(curl_account -sS -o "$src_tar" -D "$src_headers" -w "%{http_code}" \
+          "$src_base/export" 2>"$src_err") || src_code="000"
+        if [[ "$src_code" -lt 200 || "$src_code" -ge 300 ]]; then
+          src_error_code=$("$JQ_BIN" -r '.code // empty' "$src_tar" 2>/dev/null || true)
+          src_error_msg=$("$JQ_BIN" -r '.error // .message // empty' "$src_tar" 2>/dev/null || true)
+          rm -f "$src_tar" "$src_headers"
+          case "$src_error_code" in
+            source_pending)
+              rm -f "$src_err"
+              echo "The latest deploy of $src_label is still being recorded. Try again in a minute." >&2
+              exit 4 ;;
+            source_missing)
+              rm -f "$src_err"
+              echo "No source was recorded for the latest deploy of $src_label. Ask the deployer to run \`fullstack.sh up\` again." >&2
+              exit 4 ;;
+          esac
+          [[ -n "$src_error_msg" ]] || src_error_msg="$(cat "$src_err")"
+          rm -f "$src_err"
+          die "HTTP $src_code: ${src_error_msg:-could not fetch the source for $src_label}"
+        fi
+        rm -f "$src_err"
+
+        src_version=$(awk 'BEGIN{IGNORECASE=1} /^x-sharenow-version:/ {sub(/^[^:]*:[[:space:]]*/,""); gsub(/\r/,""); print}' "$src_headers" | tail -1)
+        src_commit=$(awk 'BEGIN{IGNORECASE=1} /^x-sharenow-commit:/ {sub(/^[^:]*:[[:space:]]*/,""); gsub(/\r/,""); print}' "$src_headers" | tail -1)
+        rm -f "$src_headers"
+        [[ -n "$src_version" ]] || { rm -f "$src_tar"; die "the export did not name a version; retry, and if it persists report it"; }
+
+        # Validate every entry BEFORE anything is written. An absolute path or a
+        # `..` segment in an archive is the classic path-traversal write, and a
+        # pull targets a folder the agent cares about.
+        src_bad=$(tar -tf "$src_tar" 2>/dev/null | awk '
+          { p = $0
+            sub(/^\.\//, "", p)
+            if (p == "") next
+            if (p ~ /^\//) { print; next }
+            if (p ~ /(^|\/)\.\.(\/|$)/) { print; next }
+            if (p ~ /^~/) { print; next }
+          }' | head -5 || true)
+        if [[ -n "$src_bad" ]]; then
+          rm -f "$src_tar"
+          {
+            echo "The export contains an unsafe path and was not unpacked:"
+            printf '%s\n' "$src_bad" | sed 's/^/  /'
+          } >&2
+          exit 5
+        fi
+
+        # Unpack into a staging folder first, so a tar that fails halfway never
+        # leaves the destination half-written.
+        src_stage=$(mktemp -d "${TMPDIR:-/tmp}/sharenow-pull.XXXXXX")
+        if ! tar -xf "$src_tar" -C "$src_stage" 2>/dev/null; then
+          rm -rf "$src_stage"; rm -f "$src_tar"
+          echo "The export could not be unpacked." >&2
+          exit 5
+        fi
+        rm -f "$src_tar"
+
+        mkdir -p "$src_dir" || { rm -rf "$src_stage"; die "could not create $src_dir"; }
+        # Copy rather than move: the destination may already exist, and a pull
+        # replaces the files the export carries without deleting anything else
+        # the agent put there.
+        if ! (cd "$src_stage" && tar -cf - .) | (cd "$src_dir" && tar -xf -); then
+          rm -rf "$src_stage"
+          die "could not write into $src_dir"
+        fi
+        rm -rf "$src_stage"
+
+        # Date every pulled file to this instant. The dirty check compares file
+        # mtimes against the stamp, and an archive carries whatever mtimes its
+        # builder chose (sharenow's exports are epoch-dated for reproducibility);
+        # without this a freshly pulled folder's own files could read as either
+        # local edits or as suspiciously ancient, depending on the sender.
+        find "$src_dir" -type f ! -path "$src_dir/$SOURCE_STAMP_REL" -exec touch {} + 2>/dev/null || true
+
+        source_write_stamp "$src_dir" "$src_kind" "$src_label" "$src_version" "$src_commit" \
+          || die "pulled into $src_dir but could not write $src_dir/$SOURCE_STAMP_REL"
+
+        "$JQ_BIN" -n --arg dir "$src_dir" --arg slug "$src_label" --arg version "$src_version" \
+          --arg commit "$src_commit" --arg kind "$src_kind" \
+          '{pulled:true,kind:$kind,slug:$slug,dir:$dir,version:$version,commit:(if $commit == "" then null else $commit end)}'
+        if [[ -n "$src_commit" ]]; then
+          echo "Pulled $src_label at version $src_version (commit ${src_commit:0:10}) into $src_dir." >&2
+        else
+          echo "Pulled $src_label at version $src_version into $src_dir (its commit is still being recorded)." >&2
+        fi
+        echo "Edit the folder, then publish from it: the version stamp keeps someone else's newer publish from being overwritten." >&2 ;;
     esac ;;
 
   invites)

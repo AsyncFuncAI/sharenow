@@ -5,6 +5,42 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.32.1
+
+- `publish.sh` advances the folder's stamp after a successful publish, so a
+  pulled folder can keep publishing without a re-pull.
+- `account.sh undo` says what it queued and how to watch it land; `status`
+  reports the newest git push and says when a push is still deploying or was
+  refused, instead of "In sync" while `main` is ahead of the live site.
+- The git remote refuses a force push or a delete of `main`; deploy history is
+  linear for git users too.
+- `pull`, `status`, and `undo` accept `--help`; the stale refusal names the
+  `diff` to run and never suggests `./work-latest-latest`; the "skipping local
+  sharenow state" line now says what it means.
+- The `status` human line says whether a refused or in-flight push is yours
+  or a teammate's, and no longer repeats the clone URL (it is `.cloneUrl` in
+  the JSON).
+
+## 1.32.0
+
+- Shared source. `account.sh pull <slug> <dir>` (or `--app <app-id>`) fetches a
+  Site or app's live version into a folder with no git needed, and stamps it at
+  `.sharenow/source.json`. An editor goes from accepted invite to a working copy
+  in one command.
+- Freshness. `publish.sh` and `fullstack.sh up` send the stamp's version, and a
+  folder behind the live version is refused before anything is uploaded, with
+  exit code 3 and the command to pull the newer version alongside. Folders with
+  no stamp deploy exactly as before.
+- `pull` refuses with exit 3 rather than overwriting a folder edited since its
+  own stamp; `--force` discards those changes deliberately. Exit code 4 means
+  the deploy's source is still being recorded, or was never recorded.
+- `account.sh status <slug>` prints live version, last commit, whether they
+  agree, any pending or failed recording, and the clone URL. `account.sh undo
+  <slug> [--to <commit>]` redeploys the previous recorded commit.
+- Every Site and app has a private git repo. Clone with the API key as the
+  password; a push to `main` deploys. Container apps are recorded only and still
+  need a local `up`.
+
 ## 1.31.0
 
 - Collaborators. A Site or Fullstack app owner can invite other sharenow
