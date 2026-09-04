@@ -804,10 +804,16 @@ case "$CMD" in
       [[ "$(file_mode "$secrets_file")" == 600 ]] || die "secret file must have mode 600"
       env_json=$($JQ_BIN -ce 'if type == "object" and all(to_entries[]; (.key|test("^[A-Z_][A-Z0-9_]*$")) and (.value|type=="string")) then . else error("invalid secret map") end' "$secrets_file" 2>/dev/null) || die "secret file must be a JSON object of string values"
       declared=$(printf '%s' "$receipt" | "$JQ_BIN" -c '.declaredEnv')
-      provided=$(printf '%s' "$env_json" | "$JQ_BIN" -c 'keys | sort')
-      [[ "$provided" == "$declared" ]] || die "secret file keys must exactly match the contract env list"
+      extra=$(printf '%s' "$env_json" | "$JQ_BIN" -c --argjson d "$declared" '[keys[] | select(. as $k | $d | index($k) | not)]')
+      [[ "$extra" == "[]" ]] || die "secret file has keys the contract does not declare: $extra"
+      kept=$(printf '%s' "$declared" | "$JQ_BIN" -r --argjson p "$(printf '%s' "$env_json" | "$JQ_BIN" -c 'keys')" '[.[] | select(. as $k | $p | index($k) | not)] | join(", ")')
+      [[ -z "$kept" ]] || echo "==> secrets: keeping the app's existing values for $kept" >&2
     else
-      [[ "$(printf '%s' "$receipt" | "$JQ_BIN" '.declaredEnv | length')" -eq 0 ]] || die "this contract requires --secrets-from with a mode-600 JSON file"
+      # An update needs no secrets file: every declared name keeps the value the
+      # app already has. That is what lets an editor ship code without holding
+      # the owner's secrets. A name with no existing value is refused server-side.
+      kept=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.declaredEnv | join(", ")')
+      [[ -z "$kept" ]] || echo "==> secrets: none given; keeping the app's existing values for $kept" >&2
     fi
     if [[ "$dry" -eq 1 ]]; then
       "$JQ_BIN" -n --arg appId "$app_id" --arg planId "$plan_id" '{dryRun:true,action:"update",appId:$appId,planId:$planId,approved:true,localContentVerified:true,remoteValidated:false,networkRequests:0,next:"Run update again without --dry-run to revalidate and update this existing app in place."}'

@@ -791,6 +791,12 @@ case "$CMD" in
         # local edits or as suspiciously ancient, depending on the sender.
         find "$src_dir" -type f ! -path "$src_dir/$SOURCE_STAMP_REL" -exec touch {} + 2>/dev/null || true
 
+        # An app pulled from its history must know which app it is, or the next
+        # `fullstack.sh up` here would create a second app instead of updating
+        # this one. A contract recorded before this feature may lack the line.
+        if [[ "$src_kind" == fullstack && -f "$src_dir/fullstack.yaml" ]] && ! grep -qE '^app_id:' "$src_dir/fullstack.yaml"; then
+          printf 'app_id: %s\n' "$src_app" | cat - "$src_dir/fullstack.yaml" > "$src_dir/fullstack.yaml.tmp" && mv "$src_dir/fullstack.yaml.tmp" "$src_dir/fullstack.yaml"
+        fi
         source_write_stamp "$src_dir" "$src_kind" "$src_label" "$src_version" "$src_commit" \
           || die "pulled into $src_dir but could not write $src_dir/$SOURCE_STAMP_REL"
 
