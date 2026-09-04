@@ -482,6 +482,13 @@ send_source_snapshot() {
   else
     echo "source: pending (${record_id:-recorded})"
   fi
+  # The folder now IS the live deploy. Advance its stamp so the next up from
+  # this same folder is not refused as stale by the very deploy it just made
+  # (publish.sh does the same for a Site). Only a folder that already carried
+  # a stamp for this app gets one; a plain folder keeps making no claim.
+  if [[ "$(source_stamp_slug "$root")" == "$app_id" ]]; then
+    source_write_stamp "$root" fullstack "$app_id" "$deploy_seq" || true
+  fi
   return 0
 }
 
