@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.32.3**
+**Skill version: 1.32.4**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -220,8 +220,8 @@ deploy, so sharenow can tell whether the folder is still current, and a
 successful publish advances it: keep editing and publishing from the same
 folder for as long as nobody else publishes in between.
 
-**Exit code 3 means someone else published first.** The deploy was refused
-before anything was uploaded and nothing in the folder was touched. Do not
+**Exit code 3 means someone else published first.** The live app was not
+replaced and the local folder is preserved. Do not
 retry it and do not force it; there is no force. Pull the newer version into a
 second folder, carry the edits across, and publish again:
 
@@ -235,11 +235,19 @@ second folder, carry the edits across, and publish again:
 its own stamp, so a refresh never eats uncommitted work. Pull alongside, or
 pass `--force` to discard the local changes deliberately.
 
-**Exit code 4 means the source is not available yet.** For an app, sharenow
-records the deployed folder shortly after `up` returns, so a pull that lands in
-that window says the deploy is still being recorded; wait a minute and retry.
-If it says no source was recorded at all, the deploy never sent one and the
-person who deployed needs to run `fullstack.sh up` again.
+**A Worker app receipt with `source.ready: true` is immediately editable.**
+The platform saved the accepted project before deployment; `up` skips a second
+source upload. Git history finishes independently. Check live status against
+the local stamp, then reuse the folder when they match. If the helper left its
+stamp unchanged because files changed during publication, pull into a fresh
+folder and carry those edits across.
+
+**Exit code 4 means the current source could not be exported.** Check
+`fullstack.sh status <app-id>` to resolve an interrupted deployment, then retry
+a fresh pull once. Older deployments may still need source recovery. Preserve
+the live app and local work if recovery cannot confirm the current source;
+never substitute an older recorded version or ask the user to approve doing so.
+Report a persistent failure plainly, without making Git bookkeeping a user task.
 
 Check where things stand at any time:
 
@@ -251,7 +259,11 @@ It prints the machine-readable payload on stdout (live version, last commit,
 the head of `main`, `agree`, any pending or failed recording, the newest git
 push and its state, the clone URL) and one human line on stderr. `agree: false` means the live
 version has not been recorded yet, or a git push is still deploying or was
-refused; the human line says which.
+refused; the human line says which. For a Worker app, `source.ready: true`
+independently confirms that the current editable project is available. Neither
+`agree: false` nor pending Git history blocks an edit when that source is ready.
+Normal completion messages should confirm the requested change and live URL;
+mention Git only when the user asks about it.
 
 Roll back the last deploy, as owner or editor:
 
@@ -388,7 +400,7 @@ prepare, approve, and deploy (or update with `--app`) in one command:
 
 `up` is the one-verb create-or-update deploy for a folder whose `fullstack.yaml`
 is the whole contract. Run it once to create the app (it writes `app_id:` back
-into the yaml - commit that); run it after every change to redeploy. It carries
+into the yaml); run it after every change to redeploy. It carries
 the same approval requirement as `ship`: run it only when your user has already
 approved shipping this exact project.
 

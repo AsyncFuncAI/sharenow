@@ -340,6 +340,26 @@ stage_project_file() {
   api_account POST "$BASE_URL/api/v1/drives/$drive_id/files/finalize" "$("$JQ_BIN" -n --arg uploadId "$upload_id" '{uploadId:$uploadId}')" >/dev/null
 }
 
+# Upload a small bounded batch, then join every child even when one fails.
+# No late writer can race deployment or staging cleanup.
+stage_project_batch() {
+  local drive_id="$1" root="$2" manifest="$3" entry pid failed=0
+  local pids=()
+  while IFS= read -r entry; do
+    (stage_project_file "$drive_id" "$root" "$entry") &
+    pids+=("$!")
+    if [[ "${#pids[@]}" -eq 8 ]]; then
+      for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+      [[ "$failed" -eq 0 ]] || die "project staging failed; no deployment was requested"
+      pids=()
+    fi
+  done < <(printf '%s' "$manifest" | "$JQ_BIN" -c '.[]')
+  if [[ "${#pids[@]}" -gt 0 ]]; then
+    for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+  fi
+  [[ "$failed" -eq 0 ]] || die "project staging failed; no deployment was requested"
+}
+
 # ── Source snapshot (git source of truth, KTD6) ──────────────────────────────
 #
 # After a deploy succeeds, sharenow hands back a one-time `source` grant
@@ -616,7 +636,7 @@ case "$CMD" in
     drive_response=$(api_account POST "$BASE_URL/api/v1/drives" "$("$JQ_BIN" -n --arg name "Fullstack staging ${bundle_hash:0:8}" '{name:$name,isDefault:false}')")
     drive_id=$(printf '%s' "$drive_response" | "$JQ_BIN" -r '.drive.id // .id // empty')
     [[ "$drive_id" == drv_* && "$drive_id" != *[!A-Za-z0-9_-]* ]] || die "invalid Drive create response"
-    while IFS= read -r entry; do stage_project_file "$drive_id" "$project" "$entry"; done < <(printf '%s' "$manifest" | "$JQ_BIN" -c '.[]')
+    stage_project_batch "$drive_id" "$project" "$manifest"
     plan_hash=$(printf '%s\n%s\n%s\n' "$drive_id" "$contract_sha" "$manifest_sha" | text_sha)
     plan_id="fsp_${plan_hash:0:24}"
     receipt=$("$JQ_BIN" -n --arg planId "$plan_id" --arg driveId "$drive_id" \
@@ -1041,6 +1061,11 @@ case "$CMD" in
     # `ship` already printed the refusal; exit 3 is a contract an agent branches
     # on, so it must survive the subshell rather than being flattened into the
     # generic exit 1 that `die` produces.
+    # Remember the actual folder and its provenance before submission. A
+    # concurrent editor must never receive a stamp for bytes we did not send.
+    up_original_stamp=$(cat "$(source_stamp_path "$up_folder")" 2>/dev/null || true)
+    up_original_version=$(source_stamp_version "$up_folder")
+    up_original_slug=$(source_stamp_slug "$up_folder")
     up_ship_rc=0
     up_receipt=$("$0" ship "$up_folder" ${up_ship_args[@]+"${up_ship_args[@]}"}) || up_ship_rc=$?
     if [[ "$up_ship_rc" -ne 0 ]]; then
@@ -1048,11 +1073,22 @@ case "$CMD" in
       die "up failed at ship"
     fi
 
+    # Compare with the manifest accepted by prepare, not an earlier walk.
+    up_plan_id=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.planId // empty')
+    up_submitted_manifest=$(read_receipt "$up_plan_id" | "$JQ_BIN" -c '.manifest | sort_by(.path)') || up_submitted_manifest=""
+    # Check before our own first-create app_id write-back changes the YAML.
+    up_current_manifest=$(project_manifest "$up_folder" 2>/dev/null) || up_current_manifest=""
+    up_current_stamp=$(cat "$(source_stamp_path "$up_folder")" 2>/dev/null || true)
+    up_local_unchanged=false
+    if [[ -n "$up_current_manifest" && "$up_current_manifest" == "$up_submitted_manifest" && "$up_current_stamp" == "$up_original_stamp" ]]; then
+      up_local_unchanged=true
+    fi
+
     # 5. Write the identity back on first create so the next up updates.
     up_new_id=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.appId // empty')
     if [[ -z "$up_app_id" && -n "$up_new_id" ]]; then
       printf 'app_id: %s\n' "$up_new_id" | cat - "$up_yaml" > "$up_yaml.tmp" && mv "$up_yaml.tmp" "$up_yaml"
-      echo "==> wrote app_id: $up_new_id into fullstack.yaml - commit it; the next up here updates this app" >&2
+      echo "==> wrote app_id: $up_new_id into fullstack.yaml; the next up here updates this app" >&2
     fi
     # A contract slug that disagrees with the live app reads like a rename,
     # but up never renames (and create assigns a generated address) - say so
@@ -1077,7 +1113,24 @@ case "$CMD" in
     up_target_id="${up_app_id:-$up_new_id}"
     up_seq=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.source.deploySeq // empty')
     up_token=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.source.sourceToken // empty')
-    if [[ -z "$up_target_id" ]]; then
+    up_source_ready=$(printf '%s' "$up_receipt" | "$JQ_BIN" '(.source.ready == true) and (.source.version | type == "string") and (.source.version | tostring | test("^(0|[1-9][0-9]{0,15})$"))')
+    if [[ "$up_source_ready" == true && -n "$up_target_id" ]]; then
+      # The platform retained the original upload before deploying. Its ready
+      # source is available even while background Git history is catching up.
+      up_seq=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.source.version')
+      up_stamp_safe=false
+      if [[ "$up_local_unchanged" == true && "$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.state // empty')" == live ]]; then
+        if [[ -z "$up_original_stamp" ]]; then
+          up_stamp_safe=true
+        elif [[ "$up_original_slug" == "$up_target_id" ]] && "$JQ_BIN" -en --arg old "$up_original_version" --arg new "$up_seq" \
+          '($old | test("^(0|[1-9][0-9]{0,15})$")) and (($new | tonumber) > ($old | tonumber))' >/dev/null 2>&1; then
+          up_stamp_safe=true
+        fi
+      fi
+      if [[ "$up_stamp_safe" == true ]]; then
+        source_write_stamp "$up_folder" fullstack "$up_target_id" "$up_seq" || true
+      fi
+    elif [[ -z "$up_target_id" ]]; then
       echo "source: not recorded (no app id)" >&2
     elif [[ -z "$up_seq" || -z "$up_token" ]]; then
       # An older server (or a deploy that could not open a window) sends no
@@ -1090,9 +1143,9 @@ case "$CMD" in
     unset up_token
 
     if [[ -n "$up_app_id" ]]; then
-      printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"updated"} | del(.source)'
+      printf '%s' "$up_receipt" | "$JQ_BIN" --argjson ready "$up_source_ready" '. + {upAction:"updated"} | if $ready then .source |= {ready,version,revisionId,history} else del(.source) end'
     else
-      printf '%s' "$up_receipt" | "$JQ_BIN" '. + {upAction:"created"} | del(.source)'
+      printf '%s' "$up_receipt" | "$JQ_BIN" --argjson ready "$up_source_ready" '. + {upAction:"created"} | if $ready then .source |= {ready,version,revisionId,history} else del(.source) end'
     fi
     ;;
   ship)
@@ -1118,10 +1171,11 @@ case "$CMD" in
     ship_args=()
     [[ -z "$secrets_file" ]] || ship_args=(--secrets-from "$secrets_file")
     if [[ -n "$target_app" ]]; then
-      "$0" update "$target_app" "$ship_plan_id" ${ship_args[@]+"${ship_args[@]}"}
+      ship_result=$("$0" update "$target_app" "$ship_plan_id" ${ship_args[@]+"${ship_args[@]}"}) || exit $?
     else
-      "$0" deploy "$ship_plan_id" ${ship_args[@]+"${ship_args[@]}"}
+      ship_result=$("$0" deploy "$ship_plan_id" ${ship_args[@]+"${ship_args[@]}"}) || exit $?
     fi
+    printf '%s' "$ship_result" | "$JQ_BIN" --arg planId "$ship_plan_id" '. + {planId:$planId}'
     ;;
   secrets)
     [[ $# -ge 2 ]] || die "usage: fullstack.sh secrets check <app-id> [--file <secrets.json>] | secrets set <app-id> <NAME> --value-from <mode-600-file>"
