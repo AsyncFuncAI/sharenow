@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.33.1**
+**Skill version: 1.34.0**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -89,9 +89,11 @@ with shell and external HTTPS access.
 - Fullstack deployment requires a local content-bound plan followed by a
   separate approval. Secret values come only from a mode-600 JSON file and must
   never appear in chat, command arguments, or normal output.
-- Skill updates come only from `AsyncFuncAI/sharenow`. Verify the installed
-  files against the first-party release manifest and restore the prior package
-  if verification fails.
+- Skill updates download from the first-party origin and are verified file by
+  file against its release manifest before the installed package is replaced;
+  a failed download or hash check leaves the prior package untouched. The
+  GitHub repository `AsyncFuncAI/sharenow` is the mirror fresh installs come
+  from, never an update source.
 - Do not inspect every helper during setup. Use the documented command for the
   requested job and inspect code only when diagnosing a concrete failure.
 
@@ -111,9 +113,9 @@ A single Markdown, image, PDF, audio, video, or text file gets a viewer when a
 browser opens the Site root: Markdown is rendered, media is embedded, text is
 shown in mono, and any other file gets a download card. The raw file always
 serves at its own path (`https://{slug}.sharenow.today/<filename>`), to
-non-browser clients at the root, and at `?raw=1`. Every served file carries
-`Cache-Control: private, no-cache` with an ETag, so the edge never keeps a copy,
-browsers revalidate theirs, and a republished file is visible immediately.
+non-browser clients at the root, and at `?raw=1`. Site files are cached at
+the edge for speed and purged the moment you republish; browsers always
+revalidate, so a changed file is visible immediately.
 
 Without saved credentials, publishing is anonymous: the Site is public for one
 hour and the helper stores a private claim token in `.sharenow/state.json`.
@@ -360,10 +362,13 @@ link, enters their name, and receives the first-run guide. Use `--as <name>` onl
 when the user explicitly wants the creator identity named before handoff.
 
 Every joined agent can create, claim, and complete tasks and can read or upload
-files in the one shared Channel Drive. Use `./scripts/channel.sh invite
-<channel-url-or-id>` only when the user asks to invite an agent. Use
-`--overlord` only when the user explicitly requests another human coordinator
-with elevated Channel control.
+files in the one shared Channel Drive. The channel id inside the join URL is
+itself the join capability: any agent that holds the URL can join as an agent,
+with no key and no invitation, so share it only with agents that belong in the
+room. `./scripts/channel.sh invite <channel-url-or-id>` does not gate access;
+it produces a join URL that attributes the joining agent to the inviter. Use it
+only when the user asks to invite an agent. Use `--overlord` only when the user
+explicitly requests another human coordinator with elevated Channel control.
 
 A Channel expires seven days after creation. To end it earlier, the account
 that created it runs `./scripts/channel.sh close <channel-url-or-id>`; show
@@ -797,10 +802,12 @@ before updating and do not block an older compatible capability.
 
 An update is never silently enabled. With explicit approval, update once with
 `./scripts/version.sh update --yes`, or record ongoing consent with
-`./scripts/version.sh consent on`. The helper uses the official GitHub source,
-verifies manifest hashes, and restores the previous canonical install on any
-failure. It updates `~/.agents/skills/sharenow` in place rather than creating a
-second skill copy.
+`./scripts/version.sh consent on`. The helper downloads the released files
+from the first-party origin, verifies every one against the release manifest,
+and leaves the current install untouched on any failure. It updates the
+installed package in place (the directory this helper runs from, which is
+`~/.agents/skills/sharenow` for a global install) rather than creating a second
+skill copy; GitHub is not involved.
 
 ## Account-only tools
 

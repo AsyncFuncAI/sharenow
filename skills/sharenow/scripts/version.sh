@@ -3,11 +3,11 @@ set -euo pipefail
 
 BASE_URL="https://sharenow.today"
 MANIFEST_URL="$BASE_URL/.well-known/sharenow-skill.json"
+FILES_URL="$BASE_URL/skill"
 OFFICIAL_SOURCE="AsyncFuncAI/sharenow"
 SKILL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_ROOT="${SHARENOW_STATE_DIR:-$HOME/.sharenow}"
 CONFIG_FILE="$STATE_ROOT/config.json"
-INSTALL_DIR="$HOME/.agents/skills/sharenow"
 
 usage() {
   local code="${1:-1}"
@@ -19,9 +19,11 @@ Commands:
   consent status|on|off
   update [--yes]
 
-Updates are accepted only from AsyncFuncAI/sharenow through the skills CLI.
-The installed package is checked against the first-party release manifest. A
-failed install or hash check restores the prior canonical installation.
+Updates download the released files from the first-party origin and verify
+every one against the release manifest (sha256 and size) before the installed
+package is replaced in place. A download, hash, or size failure restores the
+prior installation untouched. The GitHub repository (AsyncFuncAI/sharenow) is
+the mirror the skills CLI installs from; it is not consulted for updates.
 USAGE
   exit "$code"
 }
@@ -72,7 +74,10 @@ fetch_manifest() {
         and (.path | length) > 0
         and (.path | startswith("/") | not)
         and (.path | contains("..") | not)
-        and (.sha256 | type == "string" and test("^[a-f0-9]{64}$")))
+        and (.path | contains("//") | not)
+        and (.path | contains("\\") | not)
+        and (.sha256 | type == "string" and test("^[a-f0-9]{64}$"))
+        and ((.bytes | type) == "number" or (.bytes | type) == "null"))
     ' >/dev/null 2>&1 || die "first-party skill manifest failed validation"
   printf '%s\n' "$manifest"
 }
@@ -128,16 +133,44 @@ status_json() {
     '{state:$state,integrity:$integrity,currentVersion:$currentVersion,latestVersion:$latestVersion,minimumVersion:$minimumVersion,source:$source}'
 }
 
+# The install being updated is the package this helper runs from, resolved
+# through any symlink (an agent folder such as ~/.claude/skills/sharenow points
+# at the canonical ~/.agents/skills/sharenow). Replacing that directory in
+# place keeps every agent link valid and never creates a second copy.
+install_target() {
+  (cd -P "$SKILL_ROOT" && pwd)
+}
+
+# Abort an update: put the previous installation back exactly where it was,
+# keep the rejected download aside for inspection, and say why.
 restore_install() {
-  local backup_root="$1" reason="$2"
-  if [[ -e "$INSTALL_DIR" ]]; then mv "$INSTALL_DIR" "$backup_root/failed-install" 2>/dev/null || true; fi
-  if [[ -d "$backup_root/sharenow" ]]; then mkdir -p "$(dirname "$INSTALL_DIR")"; mv "$backup_root/sharenow" "$INSTALL_DIR"; fi
+  local target="$1" backup_root="$2" reason="$3"
+  if [[ -e "$target" && -d "$backup_root/sharenow" ]]; then mv "$target" "$backup_root/failed-install" 2>/dev/null || rm -rf "$target"; fi
+  if [[ -d "$backup_root/sharenow" ]]; then mkdir -p "$(dirname "$target")"; mv "$backup_root/sharenow" "$target"; fi
   echo "error: skill update failed ($reason); the previous installation was restored" >&2
   exit 1
 }
 
-verify_install() {
-  verify_dir "$INSTALL_DIR" "$1"
+# Download every manifest file from the first-party origin into `$stage`,
+# refusing anything whose sha256 or size disagrees with the manifest. Prints
+# a reason on stdout and returns 1 on the first failure.
+download_release() {
+  local manifest="$1" stage="$2" path expected bytes tmp code actual size
+  while IFS=$'\t' read -r path expected bytes; do
+    [[ -n "$path" ]] || continue
+    mkdir -p "$stage/$(dirname "$path")"
+    tmp="$stage/$path"
+    code=$(curl -sS -o "$tmp" -w "%{http_code}" "$FILES_URL/$path" 2>/dev/null) || code=000
+    [[ "$code" == 200 ]] || { printf 'download failed for %s (HTTP %s)' "$path" "$code"; return 1; }
+    actual=$(shasum -a 256 "$tmp" | awk '{print $1}')
+    [[ "$actual" == "$expected" ]] || { printf 'hash mismatch for %s' "$path"; return 1; }
+    if [[ -n "$bytes" && "$bytes" != null ]]; then
+      size=$(wc -c < "$tmp" | tr -d '[:space:]')
+      [[ "$size" == "$bytes" ]] || { printf 'size mismatch for %s (%s bytes, manifest says %s)' "$path" "$size" "$bytes"; return 1; }
+    fi
+    case "$path" in *.sh) chmod 755 "$tmp" ;; *) chmod 644 "$tmp" ;; esac
+  done < <(printf '%s' "$manifest" | "$JQ_BIN" -r '.files[] | [.path, .sha256, (.bytes // "")] | @tsv')
+  return 0
 }
 
 CMD="${1:-}"
@@ -167,13 +200,42 @@ case "$CMD" in
     [[ "$yes" -eq 1 || "$consent" == true ]] || die "update requires --yes or prior consent via version.sh consent on"
     manifest=$(fetch_manifest)
     [[ "$(printf '%s' "$manifest" | "$JQ_BIN" '.files | length')" -gt 0 ]] || die "release manifest contains no files"
-    mkdir -p "$STATE_ROOT"; umask 077; backup_root=$(mktemp -d "$STATE_ROOT/update-backup.XXXXXX") || die "could not create update backup"
-    if [[ -d "$INSTALL_DIR" ]]; then mv "$INSTALL_DIR" "$backup_root/sharenow"; fi
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    npx_bin="${SHARENOW_NPX_BIN:-npx}"
-    if ! "$npx_bin" -y skills add "$OFFICIAL_SOURCE" --skill sharenow -g -y >/dev/null 2>&1; then restore_install "$backup_root" "installer error"; fi
-    if ! verify_install "$manifest"; then restore_install "$backup_root" "release verification error"; fi
-    if [[ -d "$backup_root/sharenow" ]]; then mv "$backup_root/sharenow" "$STATE_ROOT/previous-skill" 2>/dev/null || true; fi
+    target=$(install_target)
+    [[ -d "$target" && -f "$target/SKILL.md" ]] || die "no installed skill package at $target"
+
+    # Already the released bytes: nothing to download, nothing to swap.
+    if verify_dir "$target" "$manifest"; then
+      status_json "$manifest"
+      exit 0
+    fi
+
+    mkdir -p "$STATE_ROOT"
+    stage_root=$(mktemp -d "$STATE_ROOT/update-stage.XXXXXX") || die "could not create update staging area"
+    chmod 700 "$stage_root"
+    stage="$stage_root/sharenow"
+    # Start from a copy of what is installed so files the manifest does not
+    # list (a bundled jq, local notes) survive; the release then overwrites
+    # every listed path with the verified bytes.
+    cp -R "$target" "$stage" || { rm -rf "$stage_root"; die "could not stage the update"; }
+    if ! reason=$(download_release "$manifest" "$stage"); then
+      rm -rf "$stage_root"
+      die "skill update failed ($reason); the installed package was not touched"
+    fi
+    if ! verify_dir "$stage" "$manifest"; then
+      rm -rf "$stage_root"
+      die "skill update failed (release verification error); the installed package was not touched"
+    fi
+
+    # Swap: the old tree steps aside, the verified tree takes its place, and
+    # the old tree is kept as previous-skill once the new one re-verifies.
+    backup_root=$(mktemp -d "$STATE_ROOT/update-backup.XXXXXX") || { rm -rf "$stage_root"; die "could not create update backup"; }
+    chmod 700 "$backup_root"
+    mv "$target" "$backup_root/sharenow" || { rm -rf "$stage_root" "$backup_root"; die "could not set the current installation aside"; }
+    if ! mv "$stage" "$target"; then restore_install "$target" "$backup_root" "could not install the verified release"; fi
+    rm -rf "$stage_root"
+    if ! verify_dir "$target" "$manifest"; then restore_install "$target" "$backup_root" "release verification error"; fi
+    rm -rf "$STATE_ROOT/previous-skill" 2>/dev/null || true
+    mv "$backup_root/sharenow" "$STATE_ROOT/previous-skill" 2>/dev/null || true
     rmdir "$backup_root" 2>/dev/null || true
     status_json "$manifest"
     ;;

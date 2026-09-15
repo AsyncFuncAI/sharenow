@@ -215,7 +215,17 @@ put_file() {
   upload_id=$(echo "$upload" | "$JQ_BIN" -r '.uploadId')
   http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT "$upload_url" -H "Content-Type: $ct" --data-binary "@$local_file")
   [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]] || die "upload failed for $path (HTTP $http_code)"
-  api_json POST "$BASE_URL/api/v1/drives/$id/files/finalize" "$("$JQ_BIN" -n --arg u "$upload_id" '{uploadId:$u}')" | "$JQ_BIN" .
+  local finalized landed
+  finalized=$(api_json POST "$BASE_URL/api/v1/drives/$id/files/finalize" "$("$JQ_BIN" -n --arg u "$upload_id" '{uploadId:$u}')")
+  # Say what landed. The finalize receipt is a bare success; the listing
+  # carries the stored path, size, type, and etag, so the caller does not
+  # need a second command to confirm the upload.
+  landed=$(file_meta "$id" "$path" 2>/dev/null || true)
+  if [[ -n "$landed" ]]; then
+    printf '%s' "$finalized" | "$JQ_BIN" --argjson f "$landed" '. + {path:$f.path,size:$f.size,contentType:$f.contentType,etag:$f.etag}'
+  else
+    printf '%s' "$finalized" | "$JQ_BIN" .
+  fi
 }
 
 case "$CMD" in

@@ -5,6 +5,38 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.34.0
+
+- `version.sh update` downloads the release from the first-party origin and
+  verifies every file against the manifest (sha256 and size) before swapping
+  the installed package in place. GitHub is no longer in the update path, so a
+  mirror lag can no longer fail an update; the repository remains the mirror
+  fresh installs come from.
+- Site files are cached at the edge for speed and purged the moment a Site is
+  republished; browsers always revalidate, so a changed file is visible
+  immediately.
+- `account.sh capabilities` reports used counts next to each limit, so an
+  agent can warn before a Site, app, or Channel limit is hit.
+- `fullstack.sh up` on a fresh folder no longer writes `app_id:` twice (the
+  1.33.0 `deploy` write-back plus `up`'s own left a duplicate key that failed
+  the next `prepare` with "Map keys must be unique"); the second `up` is an
+  update, as intended.
+- A failed `prepare`, `ship`, `deploy`, or `update` no longer leaves its
+  "Fullstack staging" Drive behind: a refused remote validation, a rejected
+  create, a failed provision, or a secrets mismatch removes the staging Drive
+  and says so, so repeated failures cannot eat the account's Drive limit.
+- `fullstack.sh logs` waits out a capture that is already running (the server
+  now says how long) and retries once instead of handing back a 409.
+- `fullstack.sh delete --dry-run` lists the managed resources that will be
+  destroyed and says there is no snapshot or undo.
+- `drive.sh put` reports the stored path, size, type, and etag.
+- Deleting a Site removes its old-address redirects, so a renamed-then-deleted
+  Site answers 404 directly instead of a redirect into a 404.
+- The platform 404 page links with https, and the link-preview head injection
+  keeps a page's `<meta charset>` inside the first 1024 bytes.
+- SKILL.md says plainly that a Channel's id is the join capability and that
+  `channel.sh invite` only adds attribution.
+
 ## 1.33.1
 
 - Served Site files carry `Cache-Control: private, no-cache` (a plain

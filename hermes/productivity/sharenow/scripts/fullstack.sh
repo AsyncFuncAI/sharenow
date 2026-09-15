@@ -601,6 +601,34 @@ yaml_build_steps() { # yaml_build_steps <file> -> one host step per line
   sed -n '/^build:/,/^[^ ]/p' "$1" 2>/dev/null | sed -n -E 's/^[[:space:]]+-[[:space:]]+//p'
 }
 
+# The staging Drive a plan uploads into is a private Drive on the account, and
+# the account has a Drive limit. Every failure after it is created (a refused
+# remote validation, a rejected create, a failed provision, a secrets mismatch)
+# used to leave it behind, so a run of failed prepares ate the whole limit.
+# Verbs that hold a staging Drive name it here; the EXIT trap removes it on a
+# non-zero exit, and the success paths clear it (prepare keeps the Drive for
+# deploy; deploy and update delete it themselves once the app is live).
+STAGING_DRIVE_CLEANUP=""
+remove_staging_drive() {
+  local drive_id="$1"
+  [[ "$drive_id" == drv_* && "$drive_id" != *[!A-Za-z0-9_-]* ]] || return 0
+  # Subshell: api_account dies on a non-2xx, and a failed cleanup must never
+  # turn into the reason the caller exits.
+  ( api_account DELETE "$BASE_URL/api/v1/drives/$drive_id" >/dev/null 2>&1 ) || return 1
+}
+staging_drive_exit_trap() {
+  local rc=$?
+  if [[ "$rc" -ne 0 && -n "${STAGING_DRIVE_CLEANUP:-}" && -n "${API_KEY:-}" ]]; then
+    if remove_staging_drive "$STAGING_DRIVE_CLEANUP"; then
+      echo "staging drive removed ($STAGING_DRIVE_CLEANUP); run prepare again once the cause is fixed" >&2
+    else
+      echo "staging drive $STAGING_DRIVE_CLEANUP could not be removed; delete it with drive.sh when convenient" >&2
+    fi
+  fi
+  exit "$rc"
+}
+trap staging_drive_exit_trap EXIT
+
 make_idempotency_key() {
   if command -v openssl >/dev/null 2>&1; then openssl rand -hex 24
   elif command -v node >/dev/null 2>&1; then node -e 'process.stdout.write(require("crypto").randomBytes(24).toString("hex"))'
@@ -685,6 +713,7 @@ case "$CMD" in
     drive_response=$(api_account POST "$BASE_URL/api/v1/drives" "$("$JQ_BIN" -n --arg name "Fullstack staging ${bundle_hash:0:8}" '{name:$name,isDefault:false}')")
     drive_id=$(printf '%s' "$drive_response" | "$JQ_BIN" -r '.drive.id // .id // empty')
     [[ "$drive_id" == drv_* && "$drive_id" != *[!A-Za-z0-9_-]* ]] || die "invalid Drive create response"
+    STAGING_DRIVE_CLEANUP="$drive_id"
     stage_project_batch "$drive_id" "$project" "$manifest"
     plan_hash=$(printf '%s\n%s\n%s\n' "$drive_id" "$contract_sha" "$manifest_sha" | text_sha)
     plan_id="fsp_${plan_hash:0:24}"
@@ -696,6 +725,7 @@ case "$CMD" in
     validation=$(remote_validate "$receipt")
     receipt=$("$JQ_BIN" -n --argjson receipt "$receipt" --argjson validation "$validation" --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '$receipt + {remoteValidation:$validation,validatedAt:$at}')
     write_receipt "$(receipt_path "$plan_id")" "$receipt"
+    STAGING_DRIVE_CLEANUP=""
     "$JQ_BIN" -n --arg planId "$plan_id" --arg driveId "$drive_id" --argjson validation "$validation" \
       '$validation + {planId:$planId,state:"validated",driveId:$driveId,approved:false,next:("Review this exact validated plan, then run fullstack.sh approve " + $planId + ".")}'
     ;;
@@ -735,9 +765,11 @@ case "$CMD" in
     [[ $# -eq 1 ]] || die "usage: fullstack.sh validate <plan-id>"
     plan_id="$1"; receipt=$(read_receipt "$plan_id"); verify_receipt_content "$receipt"
     load_account_key
+    [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" != project ]] || STAGING_DRIVE_CLEANUP=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId // empty')
     validation=$(remote_validate "$receipt")
     receipt=$("$JQ_BIN" -n --argjson receipt "$receipt" --argjson validation "$validation" --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '$receipt + {remoteValidation:$validation,validatedAt:$at}')
     write_receipt "$(receipt_path "$plan_id")" "$receipt"
+    STAGING_DRIVE_CLEANUP=""
     "$JQ_BIN" -n --arg planId "$plan_id" --argjson validation "$validation" '$validation + {planId:$planId,state:"validated",provisioned:false}'
     ;;
   approve)
@@ -772,6 +804,9 @@ case "$CMD" in
     target_app=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.targetAppId // empty')
     [[ -z "$target_app" ]] || die "plan is approved for updating $target_app; use fullstack.sh update $target_app $plan_id"
     verify_receipt_content "$receipt"
+    if [[ "$dry" -eq 0 && "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project ]]; then
+      STAGING_DRIVE_CLEANUP=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId // empty')
+    fi
     env_json='{}'
     if [[ -n "$secrets_file" ]]; then
       secrets_file=$(absolute_file "$secrets_file")
@@ -816,7 +851,7 @@ case "$CMD" in
       cleanup_body=$("$JQ_BIN" -n --arg token "$claim_token" '{token:$token}')
       api_account DELETE "$BASE_URL/api/v1/fullstack/$app_id" "$cleanup_body" >/dev/null || true
       unset claim_token created cleanup_body
-      die "Fullstack provisioning failed at $failure_code. Cleanup of the disposable app was requested; the validated staging Drive remains available for a corrected plan"
+      die "Fullstack provisioning failed at $failure_code. Cleanup of the disposable app was requested; fix the cause and run prepare again"
     fi
     url=$(printf '%s' "$status" | "$JQ_BIN" -r '.url // empty')
     [[ -n "$url" ]] && valid_branded_url "$url" || die "invalid Fullstack live URL"
@@ -843,11 +878,12 @@ case "$CMD" in
     staging_drive="not_applicable"
     if [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project ]]; then
       drive_id=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')
-      if api_account DELETE "$BASE_URL/api/v1/drives/$drive_id" >/dev/null; then
+      if remove_staging_drive "$drive_id"; then
         staging_drive="removed"
       else
         staging_drive="retained"
       fi
+      STAGING_DRIVE_CLEANUP=""
     fi
     address_state="unavailable"
     deploy_runtime="worker"
@@ -895,6 +931,9 @@ case "$CMD" in
     target_app=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.targetAppId // empty')
     [[ -n "$target_app" ]] || die "plan approval is not bound to an app; run fullstack.sh approve $plan_id --for-app $app_id"
     [[ "$target_app" == "$app_id" ]] || die "plan is approved for a different Fullstack app: $target_app"
+    if [[ "$dry" -eq 0 && "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project ]]; then
+      STAGING_DRIVE_CLEANUP=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId // empty')
+    fi
     verify_receipt_content "$receipt"
     env_json='{}'
     if [[ -n "$secrets_file" ]]; then
@@ -940,11 +979,12 @@ case "$CMD" in
     staging_drive="not_applicable"
     if [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project ]]; then
       drive_id=$(printf '%s' "$receipt" | "$JQ_BIN" -r '.driveId')
-      if api_account DELETE "$BASE_URL/api/v1/drives/$drive_id" >/dev/null; then
+      if remove_staging_drive "$drive_id"; then
         staging_drive="removed"
       else
         staging_drive="retained"
       fi
+      STAGING_DRIVE_CLEANUP=""
     fi
     boot_log="[]"
     if grep -qE '^runtime:[[:space:]]*"?container"?[[:space:]]*$' "$contract_path" 2>/dev/null; then
@@ -1155,17 +1195,31 @@ case "$CMD" in
     # Compare with the manifest accepted by prepare, not an earlier walk.
     up_plan_id=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.planId // empty')
     up_submitted_manifest=$(read_receipt "$up_plan_id" | "$JQ_BIN" -c '.manifest | sort_by(.path)') || up_submitted_manifest=""
-    # Check before our own first-create app_id write-back changes the YAML.
+    up_new_id=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.appId // empty')
+    # deploy (reached through ship) writes app_id: into a prepared folder's
+    # yaml itself, so on a first create the folder may already carry the
+    # line. Re-read the file rather than trusting the pre-ship value: writing
+    # it twice made the next prepare fail on a duplicate YAML key.
+    up_written_back=false
+    if [[ -z "$up_app_id" && -n "$up_new_id" ]] && grep -qE "^app_id:[[:space:]]*${up_new_id}[[:space:]]*$" "$up_yaml"; then
+      up_written_back=true
+    fi
+    # Compare with what prepare accepted. A yaml that differs ONLY by the
+    # app_id line deploy just prepended is still the bytes we shipped.
     up_current_manifest=$(project_manifest "$up_folder" 2>/dev/null) || up_current_manifest=""
+    if [[ "$up_written_back" == true && -n "$up_current_manifest" ]]; then
+      up_current_manifest=$(printf '%s' "$up_current_manifest" | "$JQ_BIN" -c 'map(select(.path != "fullstack.yaml"))')
+      up_submitted_manifest=$(printf '%s' "$up_submitted_manifest" | "$JQ_BIN" -c 'map(select(.path != "fullstack.yaml"))')
+    fi
     up_current_stamp=$(cat "$(source_stamp_path "$up_folder")" 2>/dev/null || true)
     up_local_unchanged=false
     if [[ -n "$up_current_manifest" && "$up_current_manifest" == "$up_submitted_manifest" && "$up_current_stamp" == "$up_original_stamp" ]]; then
       up_local_unchanged=true
     fi
 
-    # 5. Write the identity back on first create so the next up updates.
-    up_new_id=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.appId // empty')
-    if [[ -z "$up_app_id" && -n "$up_new_id" ]]; then
+    # 5. Write the identity back on first create so the next up updates,
+    # unless deploy already did (never a second app_id: line).
+    if [[ -z "$up_app_id" && -n "$up_new_id" ]] && ! grep -qE '^app_id:' "$up_yaml"; then
       printf 'app_id: %s\n' "$up_new_id" | cat - "$up_yaml" > "$up_yaml.tmp" && mv "$up_yaml.tmp" "$up_yaml"
       echo "==> wrote app_id: $up_new_id into fullstack.yaml; the next up here updates this app" >&2
     fi
@@ -1217,9 +1271,11 @@ case "$CMD" in
     elif [[ -z "$up_target_id" ]]; then
       echo "source: not recorded (no app id)" >&2
     elif [[ -z "$up_seq" || -z "$up_token" ]]; then
-      # An older server (or a deploy that could not open a window) sends no
-      # grant. Say so plainly rather than leaving the agent to wonder.
-      echo "source: not recorded (no source window)" >&2
+      # The platform did not retain this deploy's source and sent no snapshot
+      # grant either (an older server, or a deploy that could not open a
+      # window). Say exactly that, not "no source window", which read as a
+      # problem with a folder that was in fact recorded server-side.
+      echo "source: not recorded by this deploy (the server sent no snapshot grant)" >&2
     else
       load_account_key
       send_source_snapshot "$up_target_id" "$up_folder" "$up_seq" "$up_token" >&2 || true
@@ -1387,7 +1443,30 @@ case "$CMD" in
       body='{}'
     fi
     echo "capturing live Worker events (exercise the app now)..." >&2
-    api_account POST "$BASE_URL/api/v1/fullstack/$app_id/logs" "$body" | "$JQ_BIN" .
+    # A capture already running for this app answers 409 with retry_after
+    # (the seconds left on its window); wait it out once and retry rather
+    # than handing the agent a lock to reason about. Any other failure goes
+    # through the shared handler unchanged.
+    logs_url="$BASE_URL/api/v1/fullstack/$app_id/logs"
+    logs_attempt=0
+    while :; do
+      logs_attempt=$((logs_attempt + 1))
+      logs_tmp=$(mktemp)
+      logs_code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") -sS -o "$logs_tmp" -w "%{http_code}" -X POST "$logs_url" -H "content-type: application/json" -H "x-sharenow-client: $CLIENT_HEADER_VALUE" --data-binary @-) || logs_code=000
+      if [[ "$logs_code" == 409 && "$logs_attempt" -eq 1 ]]; then
+        logs_retry=$("$JQ_BIN" -r '.retry_after // empty' "$logs_tmp" 2>/dev/null || true)
+        if [[ -n "$logs_retry" && "$logs_retry" != *[!0-9]* ]]; then
+          [[ "$logs_retry" -ge 1 ]] || logs_retry=1
+          [[ "$logs_retry" -le 60 ]] || logs_retry=60
+          rm -f "$logs_tmp"
+          echo "a capture is already running; retrying in ${logs_retry}s" >&2
+          sleep "$logs_retry"
+          continue
+        fi
+      fi
+      http_handle_response "$logs_code" "$logs_tmp" | "$JQ_BIN" .
+      break
+    done
     ;;
   rename)
     [[ $# -eq 2 ]] || die "usage: fullstack.sh rename <app-id> <new-slug>"
@@ -1399,7 +1478,19 @@ case "$CMD" in
     app_id="$1"; shift; confirm=""; dry=0; valid_app_id "$app_id"
     while [[ $# -gt 0 ]]; do case "$1" in --confirm) confirm="$2"; shift 2 ;; --dry-run) dry=1; shift ;; *) die "unexpected delete argument: $1" ;; esac; done
     [[ "$confirm" == "$app_id" ]] || die "delete requires --confirm $app_id"
-    if [[ "$dry" -eq 1 ]]; then "$JQ_BIN" -n --arg appId "$app_id" '{dryRun:true,action:"delete",appId:$appId}'; exit 0; fi
+    if [[ "$dry" -eq 1 ]]; then
+      # Say what goes. The owner status carries the managed resource ledger;
+      # a receipt that names the database, bucket, and queue is the last
+      # chance to notice the wrong app id before an irreversible teardown.
+      load_account_key
+      del_status=$(api_account GET "$BASE_URL/api/v1/fullstack/$app_id/status" 2>/dev/null) || del_status='{}'
+      "$JQ_BIN" -n --arg appId "$app_id" --argjson status "$del_status" '
+        {dryRun:true,action:"delete",appId:$appId}
+        + (if ($status.url // "") == "" then {} else {url:$status.url} end)
+        + {resources:[($status.resources // [])[] | {type:.resourceType,name:.bindingName,id:.externalId}]}
+        + {warning:"Permanent. The Worker and every managed resource listed are destroyed with it: all D1 rows, R2 objects, KV entries, and queued messages. There is no snapshot and no undo; export or pull anything you need first."}'
+      exit 0
+    fi
     load_account_key; api_account DELETE "$BASE_URL/api/v1/fullstack/$app_id" | "$JQ_BIN" .
     ;;
   members)
