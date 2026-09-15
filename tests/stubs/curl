@@ -76,7 +76,22 @@ for arg in "$@"; do
   esac
 done
 
+body_file=""
 case "$url" in
+  */skill/*)
+    # The first-party release files version.sh update downloads. Serve them
+    # from STUB_CURL_SKILL_DIR when set (the canonical tree in tests), else 404.
+    skill_path="${url#*/skill/}"
+    if [[ -n "${STUB_CURL_SKILL_DIR:-}" && -f "$STUB_CURL_SKILL_DIR/$skill_path" ]]; then
+      # Byte-exact: the updater hashes what it downloads, and "$(cat ...)"
+      # would drop the trailing newline.
+      body_file="$STUB_CURL_SKILL_DIR/$skill_path"
+      status=200
+    else
+      body='{"error":"not found"}'
+      status=404
+    fi
+    ;;
   */api/auth/agent/device/start)
     body="${STUB_CURL_DEVICE_START_BODY:-$body}"
     status="${STUB_CURL_DEVICE_START_STATUS:-$status}"
@@ -172,7 +187,7 @@ if [[ "$fail_mode" -eq 1 && "$status" -ge 400 ]]; then
 fi
 
 if [[ -n "$out_file" ]]; then
-  printf '%s' "$body" > "$out_file"
+  if [[ -n "${body_file:-}" ]]; then cat "$body_file" > "$out_file"; else printf '%s' "$body" > "$out_file"; fi
 fi
 
 if [[ "$want_status_w" -eq 1 ]]; then

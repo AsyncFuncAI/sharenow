@@ -1053,26 +1053,36 @@ assert_eq "failed Fullstack provisioning deletes the disposable app" "1" \
 assert_eq "failed Fullstack provisioning never claims the app" "0" \
   "$(grep -c $'POST\thttps://sharenow.today/api/v1/fullstack/fsa_failed123/claim' "$WORK/fullstack-failed-requests" | tr -d '[:space:]' || true)"
 
+# version.sh updates the installation it lives in (resolved physically), the
+# way an installed copy under ~/.agents/skills/sharenow runs; the tests run
+# an installed COPY, never the repository tree.
 rollback_home="$(new_workdir)"
-mkdir -p "$rollback_home/.agents/skills/sharenow/scripts"
+mkdir -p "$rollback_home/.agents/skills"
+cp -R "$REPO_ROOT/sharenow" "$rollback_home/.agents/skills/sharenow"
 printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$rollback_home/.agents/skills/sharenow/SKILL.md"
 printf '%s\n' '#!/usr/bin/env bash' 'echo old-helper' > "$rollback_home/.agents/skills/sharenow/scripts/publish.sh"
 chmod +x "$rollback_home/.agents/skills/sharenow/scripts/publish.sh"
-assert_run "failed skill update restores the previous installation" 1 "restored" -- \
-  env HOME="$rollback_home" STUB_CURL_BODY="$manifest" SHARENOW_NPX_BIN=/bin/false \
-    /bin/bash "$VERSION_SCRIPT" update --yes
-assert_eq "rollback preserves the previous skill version" "yes" \
+# The stub answers every /skill/<path> download with 404 here (no
+# STUB_CURL_SKILL_DIR), so the release cannot be verified and the install
+# must be left exactly as it was: no swap, no partial write.
+assert_run "failed skill update leaves the installation untouched" 1 "was not touched" -- \
+  env HOME="$rollback_home" STUB_CURL_BODY="$manifest" \
+    /bin/bash "$rollback_home/.agents/skills/sharenow/scripts/version.sh" update --yes
+assert_eq "a failed update preserves the previous skill version" "yes" \
   "$(grep -q 'Skill version: 1.12.0' "$rollback_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
 update_home="$(new_workdir)"
-mkdir -p "$update_home/.agents/skills/sharenow"
+mkdir -p "$update_home/.agents/skills"
+cp -R "$REPO_ROOT/sharenow" "$update_home/.agents/skills/sharenow"
 printf '%s\n' '---' 'name: sharenow' '---' '' '**Skill version: 1.12.0**' > "$update_home/.agents/skills/sharenow/SKILL.md"
 skill_sha=$(shasum -a 256 "$REPO_ROOT/sharenow/SKILL.md" | awk '{print $1}')
 skill_version=$(sed -n 's/^\*\*Skill version: \([0-9][0-9.]*\)\*\*$/\1/p' "$REPO_ROOT/sharenow/SKILL.md")
 success_manifest=$(jq -cn --arg sha "$skill_sha" --arg v "$skill_version" '{name:"sharenow",source:"AsyncFuncAI/sharenow",version:$v,latestVersion:$v,minimumVersion:"1.13.0",files:[{path:"SKILL.md",sha256:$sha}]}')
+# The release files come from the first-party origin (/skill/<path>), served
+# here from the canonical tree; nothing is fetched from GitHub or npx.
 assert_run "verified skill update replaces the canonical install in place" 0 '"state": "current"' -- \
-  env HOME="$update_home" STUB_CURL_BODY="$success_manifest" SHARENOW_NPX_BIN="$STUBS/npx" SHARENOW_NPX_SOURCE="$REPO_ROOT/sharenow" \
-    /bin/bash "$VERSION_SCRIPT" update --yes
+  env HOME="$update_home" STUB_CURL_BODY="$success_manifest" STUB_CURL_SKILL_DIR="$REPO_ROOT/sharenow" \
+    /bin/bash "$update_home/.agents/skills/sharenow/scripts/version.sh" update --yes
 assert_eq "verified update installs the canonical version" "yes" \
   "$(grep -q "Skill version: $skill_version" "$update_home/.agents/skills/sharenow/SKILL.md" && echo yes || echo no)"
 
