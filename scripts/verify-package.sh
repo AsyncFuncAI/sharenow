@@ -56,6 +56,14 @@ REQUIRED_PATHS=(
   "hermes/productivity/sharenow/scripts/version.sh"
   ".codex-plugin/plugin.json"
   ".cursor-plugin/plugin.json"
+  ".cursor-plugin/marketplace.json"
+  ".grok-plugin/plugin.json"
+  "plugins/sharenow/.cursor-plugin/plugin.json"
+  "plugins/sharenow/assets/logo.svg"
+  "plugins/sharenow/README.md"
+  "plugins/sharenow/skills/sharenow/SKILL.md"
+  "plugins/sharenow/skills/sharenow/scripts/publish.sh"
+  "docs/marketplace-publish.md"
   "scripts/build-layouts.sh"
   "scripts/verify-package.sh"
 )
@@ -117,9 +125,21 @@ fi
 
 # --- 6. Plugin manifests are valid JSON -------------------------------------
 echo "[6] manifest JSON"
-for m in .codex-plugin/plugin.json .cursor-plugin/plugin.json; do
+for m in \
+  .codex-plugin/plugin.json \
+  .cursor-plugin/plugin.json \
+  .cursor-plugin/marketplace.json \
+  .grok-plugin/plugin.json \
+  plugins/sharenow/.cursor-plugin/plugin.json
+do
   if jq . "$m" >/dev/null 2>&1; then pass "valid JSON: $m"; else fail "invalid JSON: $m"; fi
 done
+mp_source=$(jq -r '.plugins[0].source // empty' .cursor-plugin/marketplace.json)
+if [[ "$mp_source" == "./plugins/sharenow" ]]; then
+  pass "marketplace source is ./plugins/sharenow"
+else
+  fail "marketplace source should be ./plugins/sharenow (got '$mp_source')"
+fi
 
 # --- 7. Install command consistency -----------------------------------------
 echo "[7] install command consistency"
@@ -131,15 +151,47 @@ done
 # Descriptions may differ by design (Codex carries detail in interface.longDescription),
 # but identity fields must agree between the two manifests.
 echo "[8] cross-manifest consistency"
+skill_ver=$(sed -n 's/^\*\*Skill version: \([^ *]*\)\*\*.*/\1/p' sharenow/SKILL.md | head -1)
+if [[ -n "$skill_ver" ]]; then
+  pass "canonical skill version $skill_ver"
+else
+  fail "could not read Skill version from sharenow/SKILL.md"
+fi
+for m in \
+  .codex-plugin/plugin.json \
+  .cursor-plugin/plugin.json \
+  .grok-plugin/plugin.json \
+  plugins/sharenow/.cursor-plugin/plugin.json
+do
+  mv=$(jq -r '.version // empty' "$m")
+  if [[ -n "$skill_ver" && "$mv" == "$skill_ver" ]]; then
+    pass "version $mv in $m"
+  else
+    fail "version in $m is '$mv', skill is '$skill_ver'"
+  fi
+done
+mp_ver=$(jq -r '.metadata.version // empty' .cursor-plugin/marketplace.json)
+if [[ -n "$skill_ver" && "$mp_ver" == "$skill_ver" ]]; then
+  pass "marketplace metadata.version $mp_ver"
+else
+  fail "marketplace metadata.version is '$mp_ver', skill is '$skill_ver'"
+fi
 for field in name version homepage repository license; do
   cv=$(jq -r --arg f "$field" '.[$f] // empty' .codex-plugin/plugin.json)
   uv=$(jq -r --arg f "$field" '.[$f] // empty' .cursor-plugin/plugin.json)
-  if [[ -n "$cv" && "$cv" == "$uv" ]]; then
+  pv=$(jq -r --arg f "$field" '.[$f] // empty' plugins/sharenow/.cursor-plugin/plugin.json)
+  if [[ -n "$cv" && "$cv" == "$uv" && "$uv" == "$pv" ]]; then
     pass "$field matches across manifests ($cv)"
   else
-    fail "$field differs across manifests (codex='$cv' cursor='$uv')"
+    fail "$field differs across manifests (codex='$cv' cursor='$uv' plugin='$pv')"
   fi
 done
+logo=$(jq -r '.logo // empty' plugins/sharenow/.cursor-plugin/plugin.json)
+if [[ "$logo" == "assets/logo.svg" && -f plugins/sharenow/assets/logo.svg ]]; then
+  pass "plugin logo path resolves"
+else
+  fail "plugin logo missing or path is '$logo'"
+fi
 
 # --- 9. Shell test suite ----------------------------------------------------
 # Run the plain-bash regression net under /bin/bash (macOS system bash 3.2) so a

@@ -71,8 +71,8 @@ curl -s https://sharenow.today/.well-known/skills/index.json
 ## Repository conventions
 
 - The skill lives once in `sharenow/`. Every other layout is generated from it by
-  `scripts/build-layouts.sh`. Never hand-edit a generated copy under `skills/` or
-  `hermes/`; edit `sharenow/` and rebuild.
+  `scripts/build-layouts.sh`. Never hand-edit a generated copy under `skills/`,
+  `hermes/`, or `plugins/sharenow/skills/`; edit `sharenow/` and rebuild.
 - `scripts/verify-package.sh` is the gate: it proves the layouts are in sync, the
   scripts lint clean, the manifests are valid JSON, and no brand violations exist.
 - House rules for everything shipped here: no em-dash, and no references to any

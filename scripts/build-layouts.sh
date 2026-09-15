@@ -16,14 +16,16 @@ CANONICAL="$REPO_ROOT/sharenow"
 SKILL_LAYOUTS=(
   "$REPO_ROOT/skills/sharenow"
   "$REPO_ROOT/hermes/productivity/sharenow"
+  "$REPO_ROOT/plugins/sharenow/skills/sharenow"
 )
 
 # Plugin-manifest dirs that reference assets/logo.svg relative to themselves.
 # The manifest JSON is authored directly (not generated); only the logo asset
 # is synced here so the manifest's logo path resolves.
+# Codex keeps the wide wordmark. The Cursor marketplace mark is the square
+# file at plugins/sharenow/assets/logo.svg and is hand-authored, not synced.
 MANIFEST_DIRS=(
   "$REPO_ROOT/.codex-plugin"
-  "$REPO_ROOT/.cursor-plugin"
 )
 
 die() { echo "error: $1" >&2; exit 1; }

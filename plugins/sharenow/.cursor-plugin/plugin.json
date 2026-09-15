@@ -21,6 +21,6 @@
     "fullstack"
   ],
   "category": "developer-tools",
-  "logo": "plugins/sharenow/assets/logo.svg",
+  "logo": "assets/logo.svg",
   "skills": "./skills/"
 }

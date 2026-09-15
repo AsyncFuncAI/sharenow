@@ -1,0 +1,531 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="https://sharenow.today"
+CREDENTIALS_FILE="$HOME/.sharenow/credentials"
+API_KEY="${SHARENOW_API_KEY:-}"
+API_KEY_SOURCE="none"
+if [[ -n "${SHARENOW_API_KEY:-}" ]]; then
+  API_KEY_SOURCE="env"
+fi
+SLUG=""
+CLAIM_TOKEN=""
+TITLE=""
+DESCRIPTION=""
+TTL=""
+CLIENT=""
+TARGET=""
+SPA_MODE=""
+FROM_DRIVE=""
+DRIVE_VERSION=""
+
+usage() {
+  local code="${1:-1}"
+  cat <<'USAGE'
+Usage: publish.sh <file-or-dir> [options]
+
+Options:
+  --slug <slug>           Update existing publish
+  --claim-token <token>   Claim token for anonymous updates
+  --title <text>          Viewer title
+  --description <text>    Viewer description
+  --ttl <seconds>         Expiry (authenticated only)
+  --client <name>         Agent name for attribution (e.g. cursor, claude-code)
+  --spa                   Enable SPA routing
+  --from-drive <drv_...>  Publish a Drive snapshot instead of local files
+  --version <dv_...>      Drive version for --from-drive (default: current head)
+USAGE
+  exit "$code"
+}
+
+die() { echo "error: $1" >&2; exit 1; }
+
+valid_account_key() {
+  local value="$1"
+  [[ "$value" == snk_????????????????????* ]] || return 1
+  [[ "$value" != *[!A-Za-z0-9_-]* ]]
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BUNDLED_JQ="${SKILL_DIR}/bin/jq"
+
+if [[ -x "$BUNDLED_JQ" ]]; then
+  JQ_BIN="$BUNDLED_JQ"
+elif command -v jq >/dev/null 2>&1; then
+  JQ_BIN="$(command -v jq)"
+else
+  die "requires jq. Install it with 'brew install jq' (macOS) or 'sudo apt-get install jq' (Debian/Ubuntu), then retry"
+fi
+
+# file(1) is optional: content_type_for falls back to it only for unknown
+# extensions and degrades to application/octet-stream when it is absent.
+command -v curl >/dev/null 2>&1 || die "requires curl. Install it with 'brew install curl' (macOS) or 'sudo apt-get install curl' (Debian/Ubuntu), then retry"
+
+# Shared HTTP response handling (needs JQ_BIN + die, both defined above). publish.sh
+# does not use the temp-file api() pattern the other scripts share (its create/
+# upload/finalize steps read the response inline, each differently), so it does not
+# call http_handle_response today; the source keeps lib/http.sh present in every
+# script's SCRIPT_DIR and available if publish's flow is later unified.
+. "$SCRIPT_DIR/lib/http.sh"
+# The source stamp and the stale refusal (git source of truth, R11/R12).
+. "$SCRIPT_DIR/lib/source.sh"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --slug)         SLUG="$2"; shift 2 ;;
+    --claim-token)  CLAIM_TOKEN="$2"; shift 2 ;;
+    --title)        TITLE="$2"; shift 2 ;;
+    --description)  DESCRIPTION="$2"; shift 2 ;;
+    --ttl)          TTL="$2"; shift 2 ;;
+    --client)       CLIENT="$2"; shift 2 ;;
+    --spa)          SPA_MODE="true"; shift ;;
+    --from-drive)   FROM_DRIVE="$2"; shift 2 ;;
+    --version)      DRIVE_VERSION="$2"; shift 2 ;;
+    --help|-h)      usage 0 ;;
+    -*)             die "unknown option: $1" ;;
+    *)              [[ -z "$TARGET" ]] && TARGET="$1" || die "unexpected argument: $1"; shift ;;
+  esac
+done
+
+if [[ -n "$FROM_DRIVE" ]]; then
+  [[ -z "$TARGET" ]] || die "--from-drive does not accept a local file-or-dir argument"
+else
+  [[ -n "$TARGET" ]] || usage
+  [[ -e "$TARGET" ]] || die "path does not exist: $TARGET"
+fi
+
+# Load API key from credentials file if not provided via flag or env
+if [[ -z "$API_KEY" && -f "$CREDENTIALS_FILE" ]]; then
+  API_KEY=$(tr -d '[:space:]' < "$CREDENTIALS_FILE")
+  [[ -n "$API_KEY" ]] && API_KEY_SOURCE="credentials"
+fi
+if [[ -n "$API_KEY" ]]; then
+  valid_account_key "$API_KEY" || die "invalid account credential format"
+fi
+
+curl_publish() {
+  if [[ -n "$API_KEY" ]]; then
+    printf 'header = "authorization: Bearer %s"\n' "$API_KEY" | curl --config - "$@"
+  else
+    curl "$@"
+  fi
+}
+
+STATE_DIR=".sharenow"
+STATE_FILE="$STATE_DIR/state.json"
+
+# Auto-load claim token from state file for slug updates (server uses it only for
+# anonymous sites; harmless when an API key is also present).
+if [[ -n "$SLUG" && -z "$CLAIM_TOKEN" && -f "$STATE_FILE" ]]; then
+  CLAIM_TOKEN=$("$JQ_BIN" -r --arg s "$SLUG" '.publishes[$s].claimToken // empty' "$STATE_FILE" 2>/dev/null || true)
+fi
+
+if [[ -n "$FROM_DRIVE" ]]; then
+  [[ -n "$API_KEY" ]] || die "--from-drive requires an account API key"
+  BODY=$("$JQ_BIN" -n --arg d "$FROM_DRIVE" '{driveId:$d}')
+  [[ -n "$DRIVE_VERSION" ]] && BODY=$(echo "$BODY" | "$JQ_BIN" --arg v "$DRIVE_VERSION" '.versionId = $v')
+  [[ -n "$SLUG" ]] && BODY=$(echo "$BODY" | "$JQ_BIN" --arg s "$SLUG" '.slug = $s')
+  if [[ -n "$TITLE" || -n "$DESCRIPTION" ]]; then
+    viewer="{}"
+    [[ -n "$TITLE" ]] && viewer=$(echo "$viewer" | "$JQ_BIN" --arg t "$TITLE" '.title = $t')
+    [[ -n "$DESCRIPTION" ]] && viewer=$(echo "$viewer" | "$JQ_BIN" --arg d "$DESCRIPTION" '.description = $d')
+    BODY=$(echo "$BODY" | "$JQ_BIN" --argjson v "$viewer" '.viewer = $v')
+  fi
+  [[ "$SPA_MODE" == "true" ]] && BODY=$(echo "$BODY" | "$JQ_BIN" '.spaMode = true')
+  CLIENT_HEADER_VALUE="sharenow-publish-sh"
+  if [[ -n "$CLIENT" ]]; then
+    normalized_client=$(echo "$CLIENT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')
+    normalized_client="${normalized_client#-}"
+    normalized_client="${normalized_client%-}"
+    if [[ -n "$normalized_client" ]]; then
+      CLIENT_HEADER_VALUE="${normalized_client}/publish-sh"
+    fi
+  fi
+
+  echo "publishing from Drive..." >&2
+  RESPONSE=$(curl_publish -sS -X POST "$BASE_URL/api/v1/publish/from-drive" \
+    -H "x-sharenow-client: $CLIENT_HEADER_VALUE" \
+    -H "content-type: application/json" \
+    -d "$BODY")
+  if echo "$RESPONSE" | "$JQ_BIN" -e '.error' >/dev/null 2>&1; then
+    err=$(echo "$RESPONSE" | "$JQ_BIN" -r '.error')
+    die "$err"
+  fi
+  SITE_URL=$(echo "$RESPONSE" | "$JQ_BIN" -r '.siteUrl')
+  OUT_SLUG=$(echo "$RESPONSE" | "$JQ_BIN" -r '.slug')
+  CURRENT_VERSION=$(echo "$RESPONSE" | "$JQ_BIN" -r '.currentVersionId')
+  DRIVE_VERSION_OUT=$(echo "$RESPONSE" | "$JQ_BIN" -r '.driveVersionId')
+  echo "$SITE_URL"
+  echo "" >&2
+  echo "publish_result.site_url=$SITE_URL" >&2
+  echo "publish_result.slug=$OUT_SLUG" >&2
+  echo "publish_result.action=from_drive" >&2
+  echo "publish_result.auth_mode=authenticated" >&2
+  echo "publish_result.api_key_source=$API_KEY_SOURCE" >&2
+  echo "publish_result.persistence=permanent" >&2
+  echo "publish_result.drive_id=$FROM_DRIVE" >&2
+  echo "publish_result.drive_version_id=$DRIVE_VERSION_OUT" >&2
+  echo "publish_result.current_version_id=$CURRENT_VERSION" >&2
+  exit 0
+fi
+
+compute_sha256() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | cut -d' ' -f1
+  else
+    shasum -a 256 "$f" | cut -d' ' -f1
+  fi
+}
+
+guess_content_type() {
+  local f="$1"
+  case "${f##*.}" in
+    html|htm) echo "text/html; charset=utf-8" ;;
+    css)      echo "text/css; charset=utf-8" ;;
+    js|mjs)   echo "text/javascript; charset=utf-8" ;;
+    json)     echo "application/json; charset=utf-8" ;;
+    md|txt)   echo "text/plain; charset=utf-8" ;;
+    svg)      echo "image/svg+xml" ;;
+    png)      echo "image/png" ;;
+    jpg|jpeg) echo "image/jpeg" ;;
+    gif)      echo "image/gif" ;;
+    webp)     echo "image/webp" ;;
+    pdf)      echo "application/pdf" ;;
+    mp4)      echo "video/mp4" ;;
+    mov)      echo "video/quicktime" ;;
+    mp3)      echo "audio/mpeg" ;;
+    wav)      echo "audio/wav" ;;
+    xml)      echo "application/xml" ;;
+    woff2)    echo "font/woff2" ;;
+    woff)     echo "font/woff" ;;
+    ttf)      echo "font/ttf" ;;
+    ico)      echo "image/x-icon" ;;
+    *)
+      local detected
+      detected=$(file --brief --mime-type "$f" 2>/dev/null || echo "application/octet-stream")
+      echo "$detected"
+      ;;
+  esac
+}
+
+refuse_sensitive_path() {
+  local rel="$1"
+  local name
+  name="$(basename "$rel")"
+  case "$name" in
+    .env|.env.*|id_rsa|id_dsa|id_ecdsa|id_ed25519|*.pem|*.key|*.p12|*.pfx)
+      die "refusing to publish sensitive-looking path: $rel. Choose a generated output folder without secrets or private keys"
+      ;;
+  esac
+}
+
+# Build file manifest as JSON array
+FILES_JSON="[]"
+
+if [[ -f "$TARGET" ]]; then
+  refuse_sensitive_path "$(basename "$TARGET")"
+  sz=$(wc -c < "$TARGET" | tr -d ' ')
+  ct=$(guess_content_type "$TARGET")
+  bn=$(basename "$TARGET")
+  h=$(compute_sha256 "$TARGET")
+  FILES_JSON=$("$JQ_BIN" -n --arg p "$bn" --argjson s "$sz" --arg c "$ct" --arg h "$h" \
+    '[{"path":$p,"size":$s,"contentType":$c,"hash":$h}]')
+  FILE_MAP=$("$JQ_BIN" -n --arg p "$bn" --arg a "$(cd "$(dirname "$TARGET")" && pwd)/$(basename "$TARGET")" \
+    '{($p):$a}')
+elif [[ -d "$TARGET" ]]; then
+  FILE_MAP="{}"
+  while IFS= read -r -d '' f; do
+    rel="${f#$TARGET/}"
+    [[ "$rel" == ".DS_Store" ]] && continue
+    [[ "$(basename "$rel")" == ".DS_Store" ]] && continue
+    case "$rel" in
+      .sharenow/data.json|.sharenow/proxy.json) ;;
+      .sharenow/*|*/.sharenow/*)
+        # Not site content: the version stamp and other local state stay in
+        # the folder and are what the freshness check reads.
+        echo "not publishing $rel (sharenow's local state, kept in the folder)" >&2
+        continue
+        ;;
+    esac
+    refuse_sensitive_path "$rel"
+    sz=$(wc -c < "$f" | tr -d ' ')
+    ct=$(guess_content_type "$f")
+    h=$(compute_sha256 "$f")
+    abs=$(cd "$(dirname "$f")" && pwd)/$(basename "$f")
+    FILES_JSON=$(echo "$FILES_JSON" | "$JQ_BIN" --arg p "$rel" --argjson s "$sz" --arg c "$ct" --arg h "$h" \
+      '. + [{"path":$p,"size":$s,"contentType":$c,"hash":$h}]')
+    FILE_MAP=$(echo "$FILE_MAP" | "$JQ_BIN" --arg p "$rel" --arg a "$abs" '. + {($p):$a}')
+  done < <(find "$TARGET" \( -type d \( -name .git -o -name node_modules \) -prune \) -o -type f -print0 | sort -z)
+else
+  die "not a file or directory: $TARGET"
+fi
+
+file_count=$(echo "$FILES_JSON" | "$JQ_BIN" 'length')
+[[ "$file_count" -gt 0 ]] || die "no files found"
+
+# Build request body
+BODY=$(echo "$FILES_JSON" | "$JQ_BIN" '{files: .}')
+
+if [[ -n "$TTL" ]]; then
+  BODY=$(echo "$BODY" | "$JQ_BIN" --argjson t "$TTL" '.ttlSeconds = $t')
+fi
+
+if [[ -n "$TITLE" || -n "$DESCRIPTION" ]]; then
+  viewer="{}"
+  [[ -n "$TITLE" ]] && viewer=$(echo "$viewer" | "$JQ_BIN" --arg t "$TITLE" '.title = $t')
+  [[ -n "$DESCRIPTION" ]] && viewer=$(echo "$viewer" | "$JQ_BIN" --arg d "$DESCRIPTION" '.description = $d')
+  BODY=$(echo "$BODY" | "$JQ_BIN" --argjson v "$viewer" '.viewer = $v')
+fi
+
+if [[ -n "$CLAIM_TOKEN" && -n "$SLUG" ]]; then
+  BODY=$(echo "$BODY" | "$JQ_BIN" --arg ct "$CLAIM_TOKEN" '.claimToken = $ct')
+fi
+
+if [[ "$SPA_MODE" == "true" ]]; then
+  BODY=$(echo "$BODY" | "$JQ_BIN" '.spaMode = true')
+fi
+
+# Freshness (R11, R12). A folder pulled with `account.sh pull` carries a stamp
+# naming the live version it was built from. Sending it turns this publish into
+# a claim ("I am building on that version"), which sharenow refuses BEFORE
+# staging anything if someone else has published since.
+#
+# Two guards on making the claim at all:
+#  - the stamp must belong to THIS slug, or a folder pulled for one Site would
+#    refuse a deliberate publish to another;
+#  - no stamp means no claim, so a folder that predates this feature, or one an
+#    agent assembled itself, publishes exactly as it always did (AE6).
+EXPECTED_VERSION=""
+STAMP_DIR=""
+if [[ -d "$TARGET" ]]; then
+  STAMP_DIR="$TARGET"
+elif [[ -f "$TARGET" ]]; then
+  STAMP_DIR="$(dirname "$TARGET")"
+fi
+if [[ -n "$STAMP_DIR" && -n "$SLUG" ]]; then
+  STAMP_SLUG="$(source_stamp_slug "$STAMP_DIR")"
+  if [[ "$STAMP_SLUG" == "$SLUG" ]]; then
+    EXPECTED_VERSION="$(source_stamp_version "$STAMP_DIR")"
+  fi
+fi
+if [[ -n "$EXPECTED_VERSION" ]]; then
+  BODY=$(echo "$BODY" | "$JQ_BIN" --arg v "$EXPECTED_VERSION" '.expectedVersion = $v')
+fi
+
+# The stale refusal, at either step. Exit 3 is the contract: an agent branches
+# on it to mean "someone else published", distinct from auth (1), validation
+# (1), and network (1) failures, so it never has to parse prose.
+refuse_if_stale() {
+  local response="$1" mine live pair
+  source_response_is_stale "$response" || return 0
+  pair="$(source_stale_versions "$response")"
+  mine="${pair%%$'\t'*}"; live="${pair#*$'\t'}"
+  [[ -n "$mine" ]] || mine="$EXPECTED_VERSION"
+  source_stale_message "${SLUG:-this Site}" "$TARGET" "$mine" "$live"
+  exit 3
+}
+
+# Determine endpoint and method
+if [[ -n "$SLUG" ]]; then
+  URL="$BASE_URL/api/v1/publish/$SLUG"
+  METHOD="PUT"
+else
+  URL="$BASE_URL/api/v1/publish"
+  METHOD="POST"
+fi
+
+AUTH_MODE="anonymous"
+if [[ -n "$API_KEY" ]]; then
+  AUTH_MODE="authenticated"
+fi
+
+CLIENT_HEADER_VALUE="sharenow-publish-sh"
+if [[ -n "$CLIENT" ]]; then
+  normalized_client=$(echo "$CLIENT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')
+  normalized_client="${normalized_client#-}"
+  normalized_client="${normalized_client%-}"
+  if [[ -n "$normalized_client" ]]; then
+    CLIENT_HEADER_VALUE="${normalized_client}/publish-sh"
+  fi
+fi
+CLIENT_ARGS=(-H "x-sharenow-client: $CLIENT_HEADER_VALUE")
+
+# Step 1: Create/update publish
+echo "creating publish ($file_count files)..." >&2
+RESPONSE=$(curl_publish -sS -X "$METHOD" "$URL" \
+  "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
+  -H "content-type: application/json" \
+  -d "$BODY")
+
+# Check for errors. The stale refusal is checked FIRST and separately: it is the
+# one failure with its own exit code, and nothing has been uploaded yet.
+refuse_if_stale "$RESPONSE"
+if echo "$RESPONSE" | "$JQ_BIN" -e '.error' >/dev/null 2>&1; then
+  err=$(echo "$RESPONSE" | "$JQ_BIN" -r '.error')
+  details=$(echo "$RESPONSE" | "$JQ_BIN" -r '.details // empty')
+  die "$err${details:+ ($details)}"
+fi
+
+OUT_SLUG=$(echo "$RESPONSE" | "$JQ_BIN" -r '.slug')
+VERSION_ID=$(echo "$RESPONSE" | "$JQ_BIN" -r '.upload.versionId')
+FINALIZE_URL=$(echo "$RESPONSE" | "$JQ_BIN" -r '.upload.finalizeUrl')
+SITE_URL=$(echo "$RESPONSE" | "$JQ_BIN" -r '.siteUrl')
+UPLOAD_COUNT=$(echo "$RESPONSE" | "$JQ_BIN" '.upload.uploads | length')
+SKIPPED_COUNT=$(echo "$RESPONSE" | "$JQ_BIN" '.upload.skipped // [] | length')
+
+[[ "$OUT_SLUG" != "null" ]] || die "unexpected response: $RESPONSE"
+
+# Step 2: Upload files (skipped files are unchanged from previous version)
+if [[ "$SKIPPED_COUNT" -gt 0 ]]; then
+  echo "uploading $UPLOAD_COUNT files ($SKIPPED_COUNT unchanged, skipped)..." >&2
+else
+  echo "uploading $UPLOAD_COUNT files..." >&2
+fi
+upload_errors=0
+
+# Uploads run in parallel (8 at a time): each PUT is independent, and serial
+# uploads were the slowest phase of multi-file publishes by far. Failures are
+# collected in a temp file because each upload runs in a background subshell.
+if [[ "$UPLOAD_COUNT" -gt 0 ]]; then
+  UPLOAD_TMP=$(mktemp -d "${TMPDIR:-/tmp}/sharenow-upload.XXXXXX")
+  # One jq pass over the response instead of three per file.
+  UPLOAD_LIST=$(echo "$RESPONSE" | "$JQ_BIN" -r '.upload.uploads[] | [.path, .url, (.headers["Content-Type"] // "")] | @tsv')
+  active=0
+  while IFS=$'\t' read -r upload_path upload_url upload_ct; do
+    [[ -n "$upload_path" ]] || continue
+
+    if [[ -f "$TARGET" && ! -d "$TARGET" ]]; then
+      local_file="$TARGET"
+    else
+      local_file=$(echo "$FILE_MAP" | "$JQ_BIN" -r --arg p "$upload_path" '.[$p]')
+    fi
+
+    if [[ ! -f "$local_file" ]]; then
+      echo "warning: missing local file for $upload_path" >&2
+      upload_errors=$((upload_errors + 1))
+      continue
+    fi
+
+    (
+      ct_args=()
+      [[ -n "$upload_ct" ]] && ct_args=(-H "Content-Type: $upload_ct")
+      http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT "$upload_url" \
+        "${ct_args[@]+"${ct_args[@]}"}" \
+        --data-binary "@$local_file") || true
+      if [[ -z "$http_code" || "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+        echo "warning: upload failed for $upload_path (HTTP ${http_code:-000})" >&2
+        printf '%s\n' "$upload_path" >>"$UPLOAD_TMP/failures"
+      fi
+    ) &
+    active=$((active + 1))
+    if [[ "$active" -ge 8 ]]; then
+      wait
+      active=0
+    fi
+  done <<<"$UPLOAD_LIST"
+  wait
+  if [[ -s "$UPLOAD_TMP/failures" ]]; then
+    upload_errors=$((upload_errors + $(wc -l <"$UPLOAD_TMP/failures")))
+  fi
+  rm -rf "$UPLOAD_TMP"
+fi
+
+[[ "$upload_errors" -eq 0 ]] || die "$upload_errors file(s) failed to upload"
+
+# Step 3: Finalize
+#
+# The freshness claim rides along again, but the server's authority for the flip
+# is the value it persisted at create: finalize compares and sets the live
+# pointer, so a second editor who staged from the same version between our
+# create and this call takes the flip and we are refused here instead. Same
+# message, same exit code, and the uploaded bytes are simply never made live.
+echo "finalizing..." >&2
+FIN_BODY=$("$JQ_BIN" -n --arg v "$VERSION_ID" '{versionId:$v}')
+if [[ -n "$EXPECTED_VERSION" ]]; then
+  FIN_BODY=$(echo "$FIN_BODY" | "$JQ_BIN" --arg e "$EXPECTED_VERSION" '.expectedVersion = $e')
+fi
+FIN_RESPONSE=$(curl_publish -sS -X POST "$FINALIZE_URL" \
+  "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}" \
+  -H "content-type: application/json" \
+  -d "$FIN_BODY")
+
+refuse_if_stale "$FIN_RESPONSE"
+if echo "$FIN_RESPONSE" | "$JQ_BIN" -e '.error' >/dev/null 2>&1; then
+  err=$(echo "$FIN_RESPONSE" | "$JQ_BIN" -r '.error')
+  die "finalize failed: $err"
+fi
+
+# Save state
+mkdir -p "$STATE_DIR"
+if [[ -f "$STATE_FILE" ]]; then
+  STATE=$(cat "$STATE_FILE")
+else
+  STATE='{"publishes":{}}'
+fi
+
+entry=$("$JQ_BIN" -n --arg s "$SITE_URL" '{siteUrl: $s}')
+
+RESPONSE_CLAIM_TOKEN=$(echo "$RESPONSE" | "$JQ_BIN" -r '.claimToken // empty')
+RESPONSE_CLAIM_URL=$(echo "$RESPONSE" | "$JQ_BIN" -r '.claimUrl // empty')
+RESPONSE_EXPIRES=$(echo "$RESPONSE" | "$JQ_BIN" -r '.expiresAt // empty')
+
+[[ -n "$RESPONSE_CLAIM_TOKEN" ]] && entry=$(echo "$entry" | "$JQ_BIN" --arg v "$RESPONSE_CLAIM_TOKEN" '.claimToken = $v')
+[[ -n "$RESPONSE_CLAIM_URL" ]] && entry=$(echo "$entry" | "$JQ_BIN" --arg v "$RESPONSE_CLAIM_URL" '.claimUrl = $v')
+[[ -n "$RESPONSE_EXPIRES" ]] && entry=$(echo "$entry" | "$JQ_BIN" --arg v "$RESPONSE_EXPIRES" '.expiresAt = $v')
+
+STATE=$(echo "$STATE" | "$JQ_BIN" --arg slug "$OUT_SLUG" --argjson e "$entry" '.publishes[$slug] = $e')
+echo "$STATE" | "$JQ_BIN" '.' > "$STATE_FILE"
+
+# Output
+echo "$SITE_URL"
+
+PERSISTENCE="permanent"
+if [[ "$AUTH_MODE" == "anonymous" ]]; then
+  PERSISTENCE="expires_1h"
+elif [[ -n "$RESPONSE_EXPIRES" ]]; then
+  PERSISTENCE="expires_at"
+fi
+
+SAFE_CLAIM_URL=""
+if [[ -n "$RESPONSE_CLAIM_URL" && "$RESPONSE_CLAIM_URL" == https://* ]]; then
+  SAFE_CLAIM_URL="$RESPONSE_CLAIM_URL"
+fi
+
+ACTION="create"
+if [[ -n "$SLUG" ]]; then
+  ACTION="update"
+fi
+
+echo "" >&2
+echo "publish_result.site_url=$SITE_URL" >&2
+echo "publish_result.slug=$OUT_SLUG" >&2
+echo "publish_result.action=$ACTION" >&2
+# The folder now IS the live version. Advance its stamp so the next publish
+# from this same folder is not refused as stale by the very version it made.
+# Only a folder that already carried a stamp for this slug gets one; a plain
+# folder keeps deploying exactly as before.
+if [[ -n "${STAMP_DIR:-}" && -n "${EXPECTED_VERSION:-}" && -n "${VERSION_ID:-}" && "${STAMP_SLUG:-}" == "$OUT_SLUG" ]]; then
+  source_write_stamp "$STAMP_DIR" site "$OUT_SLUG" "$VERSION_ID" || true
+fi
+
+echo "publish_result.auth_mode=$AUTH_MODE" >&2
+echo "publish_result.api_key_source=$API_KEY_SOURCE" >&2
+echo "publish_result.persistence=$PERSISTENCE" >&2
+echo "publish_result.expires_at=$RESPONSE_EXPIRES" >&2
+echo "publish_result.claim_url=$SAFE_CLAIM_URL" >&2
+
+if [[ "$AUTH_MODE" == "authenticated" ]]; then
+  echo "authenticated publish (permanent, saved to your account)" >&2
+else
+  echo "anonymous publish (expires in 1 hour)" >&2
+  if [[ -n "$SAFE_CLAIM_URL" ]]; then
+    echo "claim URL: $SAFE_CLAIM_URL" >&2
+  fi
+  if [[ -n "$RESPONSE_CLAIM_TOKEN" ]]; then
+    echo "claim token saved to $STATE_FILE" >&2
+  fi
+  echo "Keep it live permanently: open the claim URL in a browser and add an email (free account, 3 permanent Sites, no card needed)." >&2
+  echo "Agent alternative: run ./scripts/account.sh login --client ${CLIENT:-agent}, then publish again." >&2
+fi

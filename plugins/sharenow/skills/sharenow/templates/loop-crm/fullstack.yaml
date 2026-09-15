@@ -1,0 +1,19 @@
+slug: loopdesk
+bindings:
+  - name: DB
+    type: d1
+  - name: REPORTS
+    type: r2
+  - name: ENRICHMENT_QUEUE
+    type: queue
+env:
+  - ANTHROPIC_API_KEY
+  - ANTHROPIC_MODEL
+  - APP_ADMIN_TOKEN
+triggers:
+  - name: reconcile-leads
+    type: schedule
+    cron: "*/15 * * * *"
+code:
+  worker: worker.js
+  schema: schema.sql
