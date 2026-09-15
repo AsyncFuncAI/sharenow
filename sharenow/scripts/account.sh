@@ -27,6 +27,8 @@ Sites:
   sites                                  List your Sites
   search <query> [--limit N] [--cursor C]
   rename <slug> <new-slug>               Rename a Site's address (All Access); the old address redirects
+  delete <slug> --confirm <slug> [--dry-run]
+                                         Permanently delete a Site and its files (owner only; no undo)
 
 Site Data:
   site-data ls <slug> <collection> [--limit N] [--cursor C]
@@ -85,8 +87,11 @@ Collaborators (owner invites editors by email; --app targets a Fullstack app):
 
 Source (shared Sites and apps; --app targets a Fullstack app):
   pull <slug> <dir> [--force]   Fetch the live version into <dir> and stamp it
-  status <slug>                 Live version, last commit, whether they agree
+  pull --app <app-id> <dir>     The same for a Fullstack app
+  status <slug>                 Live version, last commit, whether they agree, clone URL
+  status --app <app-id>         The same for a Fullstack app (its clone URL is .cloneUrl)
   undo <slug> [--to <commit>]   Redeploy the previous recorded commit
+  undo --app <app-id> [--to <commit>]
 USAGE
   exit "$code"
 }
@@ -382,6 +387,25 @@ case "$CMD" in
     shift 2 || true
     [[ $# -eq 0 ]] || die "unknown option: $1"
     api_json POST "$BASE_URL/api/v1/publish/$(urlenc "$slug")/rename" "$(jobj --arg s "$new" '{slug:$s}')" | pp ;;
+
+  delete)
+    # Permanent. The slug must be repeated through --confirm, the same shape
+    # drive.sh and fullstack.sh use, so a pasted command cannot delete the
+    # wrong Site by accident. Owner only; the server refuses editors.
+    slug="${1:-}"; [[ -n "$slug" ]] || die "delete requires <slug> --confirm <slug>"; shift || true
+    confirm=""; dry=0
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --confirm) [[ $# -ge 2 ]] || die "--confirm requires the slug"; confirm="$2"; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      --help|-h) echo "Usage: account.sh delete <slug> --confirm <slug> [--dry-run]"; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac; done
+    [[ "$confirm" == "$slug" ]] || die "delete requires --confirm $slug"
+    if [[ "$dry" -eq 1 ]]; then
+      jobj --arg slug "$slug" '{dryRun:true,action:"delete",slug:$slug,detail:"Permanently deletes the Site, its files, Site Data records, and analytics. There is no undo."}'
+      exit 0
+    fi
+    $req DELETE "$BASE_URL/api/v1/publish/$(urlenc "$slug")" | pp ;;
 
   site-data)
     sub="${1:-}"; shift || true

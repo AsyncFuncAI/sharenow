@@ -17,17 +17,21 @@ Commands:
   join <channel-url-or-id> --as <name> [--dry-run]
   invite <channel-url-or-id> [--as <name>] [--overlord] [--dry-run]
   read [<channel-url-or-id>] [--as <name>] [--since <cursor>]
-  send [<channel-url-or-id>] [--as <name>] <text> [--dry-run]
+  send [<channel-url-or-id>] [--as <name>] <text> | --text <text> [--dry-run]
   dm [<channel-url-or-id>] [--as <name>] <member-id> <text> [--dry-run]
-  task [<channel-url-or-id>] [--as <name>] post <title> [--dry-run]
+  task [<channel-url-or-id>] [--as <name>] post <title> | --title <text> [--dry-run]
   task [<channel-url-or-id>] [--as <name>] claim|complete <task-id> [--dry-run]
   fs [<channel-url-or-id>] [--as <name>] ls [--prefix <path>]
   fs [<channel-url-or-id>] [--as <name>] cat <path>
   fs [<channel-url-or-id>] [--as <name>] put <path> --from <file> [--dry-run]
+  close <channel-url-or-id> [--dry-run]
 
 Account credentials come from $SHARENOW_API_KEY or ~/.sharenow/credentials.
 Channel sessions are saved privately and are never accepted as arguments.
 When the channel is omitted, the most recently created or joined Channel is used.
+close is permanent and needs the account that created the Channel: every
+message, task, and shared file is deleted for all members, ahead of the
+seven-day expiry. Show its --dry-run receipt before the real close.
 USAGE
   exit "$code"
 }
@@ -479,6 +483,32 @@ case "$CMD" in
         api_session_file "$session" POST "$BASE_URL/api/v1/channels/$id/fs/$(urlenc_path "$path")" "$content_type" "$source" | "$JQ_BIN" . ;;
       *) die "usage: channel.sh fs [channel] [--as name] ls|cat|put ..." ;;
     esac
+    ;;
+  close)
+    # Permanent, account-key only (the creator's account owns the Channel).
+    # The target is always explicit: a destructive verb never falls back to
+    # "the current Channel".
+    [[ $# -ge 1 ]] || die "usage: channel.sh close <channel-url-or-id> [--dry-run]"
+    id=""; dry=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --dry-run) dry=1; shift ;;
+        *)
+          if [[ -z "$id" ]] && is_channel_ref "$1"; then id=$(channel_id "$1")
+          else die "unexpected close argument: $1"; fi
+          shift ;;
+      esac
+    done
+    [[ -n "$id" ]] || die "close requires <channel-url-or-id>"
+    if [[ "$dry" -eq 1 ]]; then dry_receipt "close" "Permanently close Channel $id: every message, task, and shared file is deleted for all members."; exit 0; fi
+    load_account_key
+    closed=$(api_account DELETE "$BASE_URL/api/v1/channels/$id")
+    # Forget the saved sessions for a Channel that no longer exists, so a later
+    # bare command cannot land on a closed room.
+    if [[ -f "$STATE_FILE" ]]; then
+      state_write 'del(.channels[$id]) | if .current == $id then .current = null else . end' --arg id "$id"
+    fi
+    printf '%s' "$closed" | "$JQ_BIN" .
     ;;
   *) die "unknown command: $CMD" ;;
 esac

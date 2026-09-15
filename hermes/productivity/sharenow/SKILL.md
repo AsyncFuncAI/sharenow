@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.32.4**
+**Skill version: 1.33.0**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -107,8 +107,13 @@ The helper lives next to this file:
 ```
 
 A directory should contain `index.html` at its root when publishing a website.
-A single image, PDF, audio file, video, document, or folder of files gets an
-appropriate viewer automatically.
+A single Markdown, image, PDF, audio, video, or text file gets a viewer when a
+browser opens the Site root: Markdown is rendered, media is embedded, text is
+shown in mono, and any other file gets a download card. The raw file always
+serves at its own path (`https://{slug}.sharenow.today/<filename>`), to
+non-browser clients at the root, and at `?raw=1`. Every served file carries
+`Cache-Control: public, max-age=0, must-revalidate` with a strong ETag, so a
+republished file is visible immediately.
 
 Without saved credentials, publishing is anonymous: the Site is public for one
 hour and the helper stores a private claim token in `.sharenow/state.json`.
@@ -128,6 +133,16 @@ Useful publish options are available locally:
 ```bash
 ./scripts/publish.sh --help
 ```
+
+To delete a Site the user no longer wants (owner only, permanent):
+
+```bash
+./scripts/account.sh delete <slug> --confirm <slug> --dry-run
+./scripts/account.sh delete <slug> --confirm <slug>
+```
+
+Show the dry-run receipt first; the slug is repeated through `--confirm` so a
+pasted command cannot delete the wrong Site.
 
 ## Connect the user's account
 
@@ -282,9 +297,15 @@ clone URL from `status` rather than composing one; the sharenow API key is the
 password:
 
 ```bash
-./scripts/account.sh status <slug> | jq -r .cloneUrl
+./scripts/account.sh status <slug> | jq -r .cloneUrl                # a Site
+./scripts/account.sh status --app <app-id> | jq -r .cloneUrl        # a Fullstack app
 git clone "$(./scripts/account.sh status <slug> 2>/dev/null | jq -r .cloneUrl)"
 ```
+
+An app is addressed by its id, never by its slug: `status <app-slug>` answers
+that the address is a Fullstack app and names the `--app` form. `fullstack.sh
+status <app-id>` carries the same `cloneUrl`, and `fullstack.sh pull <app-id>
+<dir>` is the app-shaped spelling of `account.sh pull --app`.
 
 Pushing to `main` deploys, with the same validation and limits as a script
 deploy, billed to the owner. `main` is one linear deploy history: the remote
@@ -344,6 +365,11 @@ files in the one shared Channel Drive. Use `./scripts/channel.sh invite
 `--overlord` only when the user explicitly requests another human coordinator
 with elevated Channel control.
 
+A Channel expires seven days after creation. To end it earlier, the account
+that created it runs `./scripts/channel.sh close <channel-url-or-id>`; show
+the `--dry-run` receipt first, because every message, task, and shared file is
+deleted for all members.
+
 Run `./scripts/channel.sh --help` for messages and task commands.
 
 ## Lightweight Fullstack apps
@@ -351,8 +377,10 @@ Run `./scripts/channel.sh --help` for messages and task commands.
 Fullstack turns one explicit project folder into an approved lightweight app.
 Before changing a Fullstack app, run `./scripts/fullstack.sh list` and identify
 the existing app by its `appId` and URL. If the request is an edit to that app,
-use `update`; do not create a replacement with `deploy`.
-For a working loop-driven example, initialize the reviewed starter:
+use `update`; do not create a replacement with `deploy`. Every `fullstack.sh`
+verb accepts `--client <agent-name>` anywhere, like `publish.sh`.
+For a working loop-driven example, initialize the reviewed starter (its
+`slug:` is seeded from the folder name):
 
 ```bash
 ./scripts/fullstack.sh init loop-crm ./loopdesk
@@ -372,6 +400,12 @@ steps for a new app:
 ./scripts/fullstack.sh deploy <plan-id> --dry-run
 ./scripts/fullstack.sh deploy <plan-id> --secrets-from ./secrets.json
 ```
+
+The dry run needs no secrets file. A deploy from a prepared project folder
+writes `app_id:` back into that folder's `fullstack.yaml`, so a later `up`
+there updates this app; commit that line. The contract's `slug:` becomes the
+address when it is free; when it is taken the receipt's `slugState` says
+`taken`, the app lives at the generated `slug`, and the helper prints both.
 
 For an existing claimed live app, send the approved plan to that app instead:
 
@@ -413,7 +447,10 @@ What it infers from the folder, in order:
 
 - No `fullstack.yaml` but a `worker.js`: a minimal worker contract is
   synthesized first. Review it; env and bindings additions go there.
-- `app_id:` present: update that app. Absent: create, then write it back.
+- `app_id:` present: update that app. Absent: create, then write it back. A
+  folder that declares env but names no `app_id:` is refused before anything
+  is staged, with the fix spelled out: a create needs `--secrets-from`, an
+  update needs `app_id: <id>` (find it with `fullstack.sh list`).
 - `runtime: container`: the image is rebuilt and digest-pinned before shipping.
   The folder's single Dockerfile is used; with several, declare one. An
   optional `build:` block (every key optional) declares the build:
@@ -439,9 +476,11 @@ What it infers from the folder, in order:
   without ever holding the owner's secrets. A secrets file on update may name
   a subset of the declared env (the rest is kept); a name the app has no
   value for yet is refused with the name.
-- `slug:` never renames on update: the live address is identity-stable, and
-  `up` prints a note when the contract disagrees with it. Renames go through
-  the explicit `rename` verb.
+- `slug:` is honored on create when the address is free (a taken one gets a
+  generated address plus a note naming both; an invalid one is refused at
+  prepare). It never renames on update: the live address is identity-stable,
+  and `up` prints a note when the contract disagrees with it. Renames go
+  through the explicit `rename` verb.
 - Propagation: after a create or update the branded address can serve the
   previous version (or a placeholder on first create) for up to ~35 seconds
   while the deployment reaches every edge location. That is not a failed
@@ -819,3 +858,10 @@ account (3 permanent Sites, no card needed). The claim URL is for that user
 alone; never place it on a public page or in shared output. Alternative: connect
 the account and publish again. Do not include raw claim tokens, API keys, Drive
 tokens, or local state.
+
+When the user is done with something, the helpers own the cleanup:
+`./scripts/account.sh delete <slug> --confirm <slug>` for a Site,
+`./scripts/fullstack.sh delete <app-id> --confirm <app-id>` for an app,
+`./scripts/channel.sh close <channel-url-or-id>` for a Channel, and
+`./scripts/drive.sh delete` for a Drive. Never read the credentials file to
+hand-write a request the helpers already cover.

@@ -10,7 +10,7 @@ API_KEY="${SHARENOW_API_KEY:-}"
 usage() {
   local code="${1:-1}"
   cat <<'USAGE'
-Usage: fullstack.sh <command> [args]
+Usage: fullstack.sh [--client <agent-name>] <command> [args]
 
 Commands:
   list
@@ -26,6 +26,7 @@ Commands:
   push <folder> [--dockerfile <file>] [--name <image-name>]
   push --assemble --name <n> --base <ref> --entrypoint </path> --artifact <local>:<dest>[:<mode>]... [--env K=V]...
   status <app-id>
+  pull <app-id> <dir> [--force]
   sql <app-id> <select-statement> [--binding <name>]
   logs <app-id> [--seconds <5-60>]
   secrets check <app-id> [--file <secrets.json>]
@@ -36,13 +37,25 @@ Commands:
   invite <app-id> <email>
   uninvite <app-id> <email|inv_...|account-id>
 
+--client <agent-name> may appear anywhere and tags every request for
+attribution, the same flag publish.sh and account.sh take.
+
 Prepare scans one explicit project folder. Its dry-run is local. The live path
 stages accepted files in one private Drive and validates the exact remote bytes
 without provisioning. Deploy requires a separate approve command and repeats
-remote validation. Ship chains prepare + approve + deploy (or update with
+remote validation; a deploy from a prepared project folder writes app_id: back
+into that folder's fullstack.yaml so the next up updates the same app, and it
+honors the contract's slug: when that address is free (a taken address gets a
+generated one plus a note; an invalid one is refused before anything is
+staged). Ship chains prepare + approve + deploy (or update with
 --app) in one command - run it only when your user has already approved
 shipping this exact project. Secret values are accepted only from a mode-600
-JSON file, never from command-line values, and are never printed.
+JSON file, never from command-line values, and are never printed. A --dry-run
+deploy or update needs no secrets file.
+
+pull <app-id> <dir> fetches the app's live source into <dir> with a version
+stamp (the same as account.sh pull --app). The read-only clone URL is
+`account.sh status --app <app-id> | jq -r .cloneUrl`.
 
 sql runs one read-only SELECT against the app's D1 (no app route needed).
 logs captures LIVE Worker events for a bounded window: start it (in the
@@ -104,17 +117,22 @@ load_account_key() {
   valid_account_key "$API_KEY" || die "invalid account credential format"
 }
 
+# Attribution header for every account request (the same x-sharenow-client
+# publish.sh and account.sh send). Set once the global --client flag is parsed;
+# a child invocation ("$0" ship ...) inherits it through the environment.
+CLIENT_HEADER_VALUE="sharenow-fullstack-sh"
+
 api_account() {
   local method="$1" url="$2" body="${3:-}" idempotency="${4:-}" tmp code
   tmp=$(mktemp)
   if [[ -n "$body" ]]; then
     if [[ -n "$idempotency" ]]; then
-      code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "content-type: application/json" -H "idempotency-key: $idempotency" --data-binary @-)
+      code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "content-type: application/json" -H "x-sharenow-client: $CLIENT_HEADER_VALUE" -H "idempotency-key: $idempotency" --data-binary @-)
     else
-      code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "content-type: application/json" --data-binary @-)
+      code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "content-type: application/json" -H "x-sharenow-client: $CLIENT_HEADER_VALUE" --data-binary @-)
     fi
   else
-    code=$(printf 'header = "authorization: Bearer %s"\n' "$API_KEY" | curl --config - -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url")
+    code=$(printf 'header = "authorization: Bearer %s"\n' "$API_KEY" | curl --config - -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "x-sharenow-client: $CLIENT_HEADER_VALUE")
   fi
   http_handle_response "$code" "$tmp"
 }
@@ -136,7 +154,7 @@ api_update_app() {
   fi
   tmp=$(mktemp)
   code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") \
-    -sS -o "$tmp" -w "%{http_code}" -X PUT "$url" -H "content-type: application/json" --data-binary @-)
+    -sS -o "$tmp" -w "%{http_code}" -X PUT "$url" -H "content-type: application/json" -H "x-sharenow-client: $CLIENT_HEADER_VALUE" --data-binary @-)
   if source_response_is_stale "$tmp"; then
     pair="$(source_stale_versions "$tmp")"
     mine="${pair%%$'\t'*}"; live="${pair#*$'\t'}"
@@ -378,9 +396,9 @@ api_source() {
   local method="$1" url="$2" body="${3:-}" tmp code
   tmp=$(mktemp)
   if [[ -n "$body" ]]; then
-    code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "content-type: application/json" --data-binary @- 2>/dev/null) || code=000
+    code=$(printf '%s' "$body" | curl --config <(printf 'header = "authorization: Bearer %s"\n' "$API_KEY") -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "content-type: application/json" -H "x-sharenow-client: $CLIENT_HEADER_VALUE" --data-binary @- 2>/dev/null) || code=000
   else
-    code=$(printf 'header = "authorization: Bearer %s"\n' "$API_KEY" | curl --config - -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" 2>/dev/null) || code=000
+    code=$(printf 'header = "authorization: Bearer %s"\n' "$API_KEY" | curl --config - -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" -H "x-sharenow-client: $CLIENT_HEADER_VALUE" 2>/dev/null) || code=000
   fi
   if [[ "$code" -ge 200 && "$code" -lt 300 ]]; then
     cat "$tmp"; rm -f "$tmp"; return 0
@@ -589,6 +607,28 @@ make_idempotency_key() {
   else die "deploy requires openssl or node for a high-entropy idempotency key"; fi
 }
 
+# Global flags may appear anywhere in argv (`fullstack.sh list --client x`
+# and `fullstack.sh --client x list` both work). They are stripped here, before
+# dispatch, so no verb has to know about them. The value is exported so the
+# child invocations ship/up make ("$0" prepare ...) carry the same attribution.
+CLIENT="${SHARENOW_FULLSTACK_CLIENT:-}"
+global_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --client) [[ $# -ge 2 ]] || die "--client requires a value"; CLIENT="$2"; shift 2 ;;
+    --client=*) CLIENT="${1#--client=}"; shift ;;
+    *) global_args+=("$1"); shift ;;
+  esac
+done
+set -- ${global_args[@]+"${global_args[@]}"}
+if [[ -n "$CLIENT" ]]; then
+  normalized_client=$(printf '%s' "$CLIENT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')
+  normalized_client="${normalized_client#-}"
+  normalized_client="${normalized_client%-}"
+  [[ -z "$normalized_client" ]] || CLIENT_HEADER_VALUE="${normalized_client}/fullstack-sh"
+  export SHARENOW_FULLSTACK_CLIENT="$CLIENT"
+fi
+
 CMD="${1:-}"
 case "$CMD" in --help|-h) usage 0 ;; "") usage ;; esac
 shift
@@ -607,7 +647,16 @@ case "$CMD" in
     [[ -d "$template_dir" ]] || die "loop-crm starter is missing from this skill installation"
     cp -Rp "$template_dir/." "$destination/"
     destination=$(absolute_dir "$destination")
-    "$JQ_BIN" -n --arg destination "$destination" '{template:"loop-crm",destination:$destination,next:("Review " + $destination + ", then run fullstack.sh prepare " + $destination + " --dry-run.")}'
+    # The starter's slug becomes the app's address when it is free, so seed it
+    # from the folder name rather than shipping the template's fixed label to
+    # everyone who inits it.
+    init_slug=$(basename "$destination" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-' | cut -c1-63 | sed 's/^-*//;s/-*$//')
+    if [[ -n "$init_slug" && -f "$destination/fullstack.yaml" ]] && grep -qE '^slug:' "$destination/fullstack.yaml"; then
+      sed -i.bak -E "s/^slug:.*/slug: $init_slug/" "$destination/fullstack.yaml" && rm -f "$destination/fullstack.yaml.bak"
+    else
+      init_slug=$(yaml_top_get "$destination/fullstack.yaml" slug)
+    fi
+    "$JQ_BIN" -n --arg destination "$destination" --arg slug "$init_slug" '{template:"loop-crm",destination:$destination,slug:$slug,next:("Review " + $destination + ", then run fullstack.sh prepare " + $destination + " --dry-run.")}'
     ;;
   prepare)
     [[ $# -ge 1 ]] || die "usage: fullstack.sh prepare <project-folder> [--dry-run]"
@@ -731,7 +780,9 @@ case "$CMD" in
       declared=$(printf '%s' "$receipt" | "$JQ_BIN" -c '.declaredEnv')
       provided=$(printf '%s' "$env_json" | "$JQ_BIN" -c 'keys | sort')
       [[ "$provided" == "$declared" ]] || die "secret file keys must exactly match the contract env list"
-    else
+    elif [[ "$dry" -eq 0 ]]; then
+      # A dry run provisions nothing and contacts nothing, so it has no use for
+      # the secrets file; only the real deploy needs the declared env values.
       [[ "$(printf '%s' "$receipt" | "$JQ_BIN" '.declaredEnv | length')" -eq 0 ]] || die "this contract requires --secrets-from with a mode-600 JSON file"
     fi
     if [[ "$dry" -eq 1 ]]; then
@@ -749,6 +800,12 @@ case "$CMD" in
     app_id=$(printf '%s' "$created" | "$JQ_BIN" -r '.appId // empty')
     claim_token=$(printf '%s' "$created" | "$JQ_BIN" -r '.claimToken // empty')
     valid_app_id "$app_id"; [[ "$claim_token" == clm_* ]] || die "invalid Fullstack create response"
+    # The address the server assigned, and whether it is the one the contract
+    # asked for. An older server answers without slugState; the receipt then
+    # carries only what it did say.
+    deploy_slug=$(printf '%s' "$created" | "$JQ_BIN" -r '.slug // empty')
+    deploy_requested_slug=$(printf '%s' "$created" | "$JQ_BIN" -r '.requestedSlug // empty')
+    deploy_slug_state=$(printf '%s' "$created" | "$JQ_BIN" -r '.slugState // empty')
     state="provisioning"; waited=0; status='{}'
     while [[ "$state" == provisioning && "$waited" -lt 180 ]]; do
       sleep 2; waited=$((waited + 2)); status=$(api_account GET "$BASE_URL/api/v1/fullstack/$app_id/status"); state=$(printf '%s' "$status" | "$JQ_BIN" -r '.state // empty')
@@ -765,6 +822,17 @@ case "$CMD" in
     [[ -n "$url" ]] && valid_branded_url "$url" || die "invalid Fullstack live URL"
     api_account POST "$BASE_URL/api/v1/fullstack/$app_id/claim" "$($JQ_BIN -n --arg token "$claim_token" '{token:$token}')" >/dev/null
     unset claim_token created
+    # A deploy from a prepared project folder is that folder's first create:
+    # write the identity back exactly as `up` does, so the next `up` there
+    # updates this app instead of reading the folder as a brand-new one.
+    if [[ "$(printf '%s' "$receipt" | "$JQ_BIN" -r '.sourceType // "legacy"')" == project && -f "$contract_path" ]] \
+      && ! grep -qE '^app_id:' "$contract_path"; then
+      printf 'app_id: %s\n' "$app_id" | cat - "$contract_path" > "$contract_path.tmp" && mv "$contract_path.tmp" "$contract_path"
+      echo "==> wrote app_id: $app_id into fullstack.yaml; the next up here updates this app" >&2
+    fi
+    if [[ "$deploy_slug_state" == taken && -n "$deploy_requested_slug" ]]; then
+      echo "==> note: contract asked for slug: $deploy_requested_slug but that address is taken; the app lives at ${deploy_slug:-a generated address}; run 'rename $app_id <other>' or update the contract's slug to match" >&2
+    fi
     # The per-deploy source grant for a SPAWN lives on the status route, not on
     # the create response: a spawn returns while the app is still provisioning.
     # Read it only NOW, after the claim - the grant is a write credential for the
@@ -801,7 +869,10 @@ case "$CMD" in
     [[ -n "${source_grant:-}" ]] || source_grant="null"
     "$JQ_BIN" -n --arg appId "$app_id" --arg state "$state" --arg url "$url" --arg addressState "$address_state" --arg stagingDrive "$staging_drive" \
       --arg runtime "$deploy_runtime" --argjson bootLog "$boot_log" --argjson source "$source_grant" \
+      --arg slug "$deploy_slug" --arg requestedSlug "$deploy_requested_slug" --arg slugState "$deploy_slug_state" \
       '{appId:$appId,state:$state,persistence:"permanent",addressState:$addressState,stagingDrive:$stagingDrive}
+      + (if $slug == "" then {} else {slug:$slug} end)
+      + (if $slugState == "" then {} else {requestedSlug:(if $requestedSlug == "" then null else $requestedSlug end),slugState:$slugState} end)
       + (if $source == null then {} else {source:$source} end)
       + (if $runtime == "container" then {bootLog:$bootLog} else {} end)
       + (if $addressState == "ready" then {url:$url}
@@ -1000,6 +1071,14 @@ case "$CMD" in
     # 2. Identity: app_id in the yaml wins; absent means create-and-write-back.
     up_app_id=$(yaml_top_get "$up_yaml" app_id)
     [[ -z "$up_app_id" ]] || valid_app_id "$up_app_id"
+    # Say what a missing app_id MEANS before anything is built or staged: a
+    # folder that declares env but names no app would be created as a NEW app,
+    # and the "requires --secrets-from" refusal deploy would print hides that.
+    # The natural recovery from that message (supplying the secrets) would
+    # mint a duplicate app; naming the real cause prevents it.
+    if [[ -z "$up_app_id" && -z "$up_secrets" ]] && [[ "$(declared_env "$up_yaml" | "$JQ_BIN" 'length')" -gt 0 ]]; then
+      die "no app_id in fullstack.yaml: this folder would create a NEW app, and its declared env needs --secrets-from <mode-600 json>. To update an existing app add  app_id: <id>  (find it with fullstack.sh list)"
+    fi
 
     # 3. Container build: run declared host steps, then docker build + push.
     if grep -qE '^runtime:[[:space:]]*"?container"?[[:space:]]*$' "$up_yaml"; then
@@ -1100,7 +1179,12 @@ case "$CMD" in
       up_live_slug=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.url // empty' | sed -nE 's|^https://([^./]+)\..*$|\1|p')
     fi
     up_note_id="${up_app_id:-$up_new_id}"
-    if [[ -n "$up_note_id" && -n "$up_yaml_slug" && -n "$up_live_slug" && "$up_yaml_slug" != "$up_live_slug" ]]; then
+    # On a create the server already decided (and deploy printed) whether the
+    # contract's slug was honored or taken; only an update, or a create against
+    # an older server that reports no slugState, still needs the mismatch note.
+    up_slug_state=$(printf '%s' "$up_receipt" | "$JQ_BIN" -r '.slugState // empty')
+    if [[ -n "$up_note_id" && -n "$up_yaml_slug" && -n "$up_live_slug" && "$up_yaml_slug" != "$up_live_slug" ]] \
+      && [[ -n "$up_app_id" || -z "$up_slug_state" ]]; then
       echo "==> note: contract says slug: $up_yaml_slug but the live app is $up_live_slug; up never renames - run 'rename $up_note_id $up_yaml_slug' if the move is intended, or update the contract's slug to match" >&2
     fi
     # 6. Send the deployed-from folder as this deploy's source (KTD6, R2).
@@ -1253,6 +1337,19 @@ case "$CMD" in
   status)
     [[ $# -eq 1 ]] || die "usage: fullstack.sh status <app-id>"
     valid_app_id "$1"; load_account_key; api_account GET "$BASE_URL/api/v1/fullstack/$1/status" | "$JQ_BIN" .
+    ;;
+  pull)
+    # The app's live source into a folder, stamped. account.sh owns the export
+    # + unpack + stamp logic for Sites and apps alike; this is the app-shaped
+    # entry point so the verb is discoverable from the Fullstack helper.
+    [[ $# -ge 2 ]] || die "usage: fullstack.sh pull <app-id> <dir> [--force]"
+    pull_app="$1"; pull_dir="$2"; shift 2; valid_app_id "$pull_app"
+    pull_args=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in --force) pull_args+=(--force); shift ;; *) die "unexpected pull argument: $1" ;; esac
+    done
+    [[ -x "$SCRIPT_DIR/account.sh" ]] || die "account.sh is missing next to fullstack.sh; reinstall the skill"
+    exec "$SCRIPT_DIR/account.sh" pull --app "$pull_app" "$pull_dir" ${pull_args[@]+"${pull_args[@]}"}
     ;;
   sql)
     [[ $# -ge 2 ]] || die "usage: fullstack.sh sql <app-id> <select-statement> [--binding <name>]"

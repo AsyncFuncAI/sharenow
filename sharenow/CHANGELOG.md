@@ -5,6 +5,42 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.33.0
+
+- Republished Site files are fresh at once. Every served file carries
+  `Cache-Control: public, max-age=0, must-revalidate` and a strong ETag, so a
+  changed CSS, JS, or image no longer sits behind a stale edge copy for hours
+  while the HTML already shows the new version.
+- A single-file Site (Markdown, image, PDF, audio, video, text) gets a real
+  viewer when a browser opens its root: Markdown is rendered, media is embedded,
+  text is shown in mono, and any other file gets a download card. The raw file
+  still serves at its own path, to non-browser clients at the root, and at
+  `?raw=1`.
+- `fullstack.sh deploy` writes `app_id:` back into the prepared folder's
+  `fullstack.yaml`, exactly as `up` does, so the next `up` there updates the
+  same app instead of asking for secrets. A create honors the contract's
+  `slug:` when the address is free; a taken address gets a generated one plus
+  a note naming both, and an invalid one is refused at prepare.
+- `fullstack.sh up` on a folder with declared env and no `app_id:` explains
+  that the folder would create a new app and how to point it at an existing
+  one, instead of demanding `--secrets-from`.
+- `fullstack.sh deploy --dry-run` and `update --dry-run` need no secrets file.
+- `fullstack.sh` accepts `--client <agent-name>` anywhere, as `publish.sh` and
+  `account.sh` do, and sends it as the attribution header.
+- `fullstack.sh pull <app-id> <dir>` fetches an app's live source (the same as
+  `account.sh pull --app`). The clone URL is
+  `account.sh status --app <app-id> | jq -r .cloneUrl`; `fullstack.sh status`
+  now carries `cloneUrl` too.
+- `account.sh delete <slug> --confirm <slug> [--dry-run]` deletes a Site
+  through the helper, so cleanup never needs a hand-written request.
+- `channel.sh close <channel-url-or-id> [--dry-run]` closes a Channel ahead of
+  its expiry, for the account that created it.
+- `account.sh rename` keeps the Site's deploy history, so `undo` still finds
+  the earlier commit after a rename.
+- `account.sh status <app-slug>` names the app and the `--app <app-id>` form
+  instead of "site not found".
+- `fullstack.sh init` seeds `slug:` from the destination folder name.
+
 ## 1.32.4
 
 - Stage project files in bounded concurrent batches to reduce publish latency.
