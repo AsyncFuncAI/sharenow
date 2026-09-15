@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.33.0**
+**Skill version: 1.33.1**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -112,8 +112,8 @@ browser opens the Site root: Markdown is rendered, media is embedded, text is
 shown in mono, and any other file gets a download card. The raw file always
 serves at its own path (`https://{slug}.sharenow.today/<filename>`), to
 non-browser clients at the root, and at `?raw=1`. Every served file carries
-`Cache-Control: public, max-age=0, must-revalidate` with a strong ETag, so a
-republished file is visible immediately.
+`Cache-Control: private, no-cache` with an ETag, so the edge never keeps a copy,
+browsers revalidate theirs, and a republished file is visible immediately.
 
 Without saved credentials, publishing is anonymous: the Site is public for one
 hour and the helper stores a private claim token in `.sharenow/state.json`.
