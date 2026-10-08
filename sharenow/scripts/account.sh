@@ -3,7 +3,8 @@ set -euo pipefail
 
 # sharenow account.sh: drives every sharenow capability beyond Sites (publish.sh)
 # and Drives (drive.sh): Site Data, profiles, custom domains, handles, links,
-# service variables, analytics, API key management, and Site list/search/access.
+# service variables, analytics, tracked links and viewer insights, API key
+# management, and Site list/search/access.
 # All operations use an account API key (snk_).
 
 BASE_URL="https://sharenow.today"
@@ -68,6 +69,15 @@ Links & variables:
 
 Analytics:
   analytics [<slug>] [--range 24h|7d|30d|90d|all]
+
+Tracked links & viewer insights (All Access; one link per recipient):
+  tracked-links <slug>
+  tracked-link create <slug> --name "Sequoia, Alice" [--gate none|email|verified] [--expires-days N] [--no-notify]
+  tracked-link off|on <slug> <link-id>
+  tracked-link rm <slug> <link-id>     Deletes the link and everything recorded through it
+  viewers <slug> [--csv viewers|sections|visits]
+  viewer rm <slug> <viewer-id>         Deletes one reader's record (their deletion request)
+  preview-link <slug>                  15-minute owner preview, opens past link gates, untracked
 
 API keys:
   keys
@@ -526,6 +536,68 @@ case "$CMD" in
     if [[ -n "$slug" ]]; then url="$BASE_URL/api/v1/publishes/$(urlenc "$slug")/analytics"; else url="$BASE_URL/api/v1/analytics"; fi
     [[ -n "$range" ]] && url="$url?range=$(urlenc "$range")"
     $req GET "$url" | pp ;;
+
+  viewers)
+    # Who read a Site through its tracked links. --csv prints one table instead
+    # of the JSON: viewers (who opened), sections (time per section, per
+    # reader), or visits (the visit log).
+    slug=""; csv=""
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --csv) [[ $# -ge 2 ]] || die "--csv requires viewers|sections|visits"; csv="$2"; shift 2 ;;
+      --*) die "unknown option: $1" ;;
+      *) slug="$1"; shift ;;
+    esac; done
+    [[ -n "$slug" ]] || die "viewers requires <slug>"
+    url="$BASE_URL/api/v1/publishes/$(urlenc "$slug")/viewers"
+    if [[ -n "$csv" ]]; then
+      curl_account -sS --fail-with-body "$url?format=csv&table=$(urlenc "$csv")"
+    else
+      $req GET "$url" | pp
+    fi ;;
+
+  viewer)
+    sub="${1:-}"; slug="${2:-}"; id="${3:-}"
+    [[ "$sub" == "rm" && -n "$slug" && -n "$id" ]] || die "usage: viewer rm <slug> <viewer-id>"
+    $req DELETE "$BASE_URL/api/v1/publishes/$(urlenc "$slug")/viewers/$(urlenc "$id")" | pp ;;
+
+  tracked-links)
+    slug="${1:-}"; [[ -n "$slug" ]] || die "tracked-links requires <slug>"
+    $req GET "$BASE_URL/api/v1/publishes/$(urlenc "$slug")/tracked-links" | pp ;;
+
+  tracked-link)
+    sub="${1:-}"; slug="${2:-}"; shift 2 || true
+    [[ -n "$sub" && -n "$slug" ]] || die "usage: tracked-link create|off|on|rm <slug> ..."
+    base="$BASE_URL/api/v1/publishes/$(urlenc "$slug")/tracked-links"
+    case "$sub" in
+      create)
+        name=""; gate="none"; days=""; notify="true"
+        while [[ $# -gt 0 ]]; do case "$1" in
+          --name) [[ $# -ge 2 ]] || die "--name requires a value"; name="$2"; shift 2 ;;
+          --gate) [[ $# -ge 2 ]] || die "--gate requires none|email|verified"; gate="$2"; shift 2 ;;
+          --expires-days) [[ $# -ge 2 ]] || die "--expires-days requires a number"; days="$2"; shift 2 ;;
+          --no-notify) notify="false"; shift ;;
+          *) die "unknown option: $1" ;;
+        esac; done
+        [[ -n "$name" ]] || die "tracked-link create requires --name (who the link is for)"
+        body=$(jobj --arg n "$name" --arg g "$gate" --argjson notify "$notify" '{name:$n, gate:$g, notify:$notify}')
+        if [[ -n "$days" ]]; then
+          [[ "$days" =~ ^[0-9]+$ ]] || die "--expires-days must be a whole number of days"
+          body=$("$JQ_BIN" -n --argjson c "$body" --argjson d "$days" '$c + {expiresInDays:$d}')
+        fi
+        api_json POST "$base" "$body" | pp ;;
+      off|on)
+        id="${1:-}"; [[ -n "$id" ]] || die "tracked-link $sub requires <link-id>"
+        revoked="false"; [[ "$sub" == "off" ]] && revoked="true"
+        api_json PATCH "$base/$(urlenc "$id")" "$(jobj --argjson r "$revoked" '{revoked:$r}')" | pp ;;
+      rm)
+        id="${1:-}"; [[ -n "$id" ]] || die "tracked-link rm requires <link-id>"
+        $req DELETE "$base/$(urlenc "$id")" | pp ;;
+      *) die "unknown tracked-link subcommand: $sub" ;;
+    esac ;;
+
+  preview-link)
+    slug="${1:-}"; [[ -n "$slug" ]] || die "preview-link requires <slug>"
+    api_json POST "$BASE_URL/api/v1/publishes/$(urlenc "$slug")/preview-link" "{}" | pp ;;
 
   keys)
     sub="${1:-}"; shift || true

@@ -5,6 +5,16 @@ changed?" should read this file, not the commit history. It ships inside the
 skill package and is always served at `https://sharenow.today/skill/CHANGELOG.md`;
 compare with `scripts/version.sh` to see where your installed copy sits.
 
+## 1.35.0
+
+- Tracked links and viewer insights (All Access): `account.sh tracked-link
+  create <slug> --name "<recipient>"` makes a per-recipient link; `viewers
+  <slug>` returns who opened it, read time, time per section, visits, and
+  forwarding/sharing signals (`--csv viewers|sections|visits` for the three
+  tables). Also `tracked-links`, `tracked-link off|on|rm`, `viewer rm`, and
+  `preview-link`. Access mode `links` closes the plain address to anyone
+  without a link. Mark sections with `data-sharenow-section`.
+
 ## 1.34.0
 
 - `version.sh update` downloads the release from the first-party origin and

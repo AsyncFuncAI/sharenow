@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.34.0**
+**Skill version: 1.35.0**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -844,6 +844,32 @@ instead of a generated slug), run `./scripts/account.sh rename <slug>
 <new-slug>`; for a claimed Fullstack app, `./scripts/fullstack.sh rename
 <app-id> <new-slug>`. Both require All Access. The old address keeps
 redirecting to the new one, so previously shared links continue to work.
+
+## Tracked links: who read what the user sent
+
+When the user sends a Site (a deck, proposal, or report) to specific people and
+wants to know who opened it, how long they read, and which sections held them,
+give each person their own tracked link (All Access):
+
+```bash
+./scripts/account.sh tracked-link create <slug> --name "Sequoia, Alice" [--gate email|verified] [--expires-days 30]
+./scripts/account.sh viewers <slug>                 # who opened, read time, sections, visits, signals
+./scripts/account.sh viewers <slug> --csv viewers   # or sections, visits
+```
+
+Return `.link.url` to the user and never post it publicly. Name each link after
+its recipient so every reader has a name. Use `--gate email` for one link shared
+with a group and `--gate verified` when the address must be real. To make the
+plain address stop opening for anyone without a link, set the access mode to
+`links` (`PATCH /api/v1/publish/<slug>/access` with `{"mode":"links"}`); the
+owner's key still opens it, and `preview-link <slug>` gives a 15-minute
+untracked preview URL.
+
+When publishing a deck or long page the user will send this way, name its parts
+so the report reads like the outline: add `data-sharenow-section="The ask"` to
+each section's outer element. Only people who open a tracked link are tracked,
+no IP address is stored, and an open with no interaction (an email security
+scanner) is listed but never counted.
 
 ## Local requirements
 
