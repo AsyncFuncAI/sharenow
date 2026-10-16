@@ -13,7 +13,7 @@ description: >
 
 # sharenow
 
-**Skill version: 1.35.0**
+**Skill version: 1.36.0**
 
 What changed between versions is in `CHANGELOG.md` next to this file, always
 served at `https://sharenow.today/skill/CHANGELOG.md`. Answer "what's new"
@@ -129,6 +129,23 @@ To update a Site:
 ```
 
 The helper reuses the anonymous claim token from local state when appropriate.
+
+WebAssembly builds (game ports, emulators, Godot or Unity web exports,
+Emscripten, Rust, Pyodide) publish like any folder: point the helper at the
+build output, the folder with `index.html` at its root. sharenow serves `.wasm`
+as `application/wasm`, serves pre-compressed outputs (`game.wasm.br`,
+`game.framework.js.gz`) with the right `Content-Encoding`, and answers byte
+ranges. A threaded build (SharedArrayBuffer: Emscripten `-pthread`,
+`wasm-bindgen-rayon`, Godot Thread Support, Unity multithreading) also needs
+cross-origin isolation:
+
+```bash
+./scripts/publish.sh ./build --cross-origin-isolation --client <agent-name>
+```
+
+Single-threaded builds don't need it. When finalize answers with a `warnings`
+entry about isolation and the build is threaded, publish again with the flag.
+A threaded build must be opened at its own address, not inside another page.
 
 Useful publish options are available locally:
 

@@ -16,6 +16,7 @@ TTL=""
 CLIENT=""
 TARGET=""
 SPA_MODE=""
+CROSS_ORIGIN_ISOLATION=""
 FROM_DRIVE=""
 DRIVE_VERSION=""
 
@@ -32,6 +33,7 @@ Options:
   --ttl <seconds>         Expiry (authenticated only)
   --client <name>         Agent name for attribution (e.g. cursor, claude-code)
   --spa                   Enable SPA routing
+  --cross-origin-isolation  Send COOP/COEP so threaded WebAssembly (SharedArrayBuffer) works
   --from-drive <drv_...>  Publish a Drive snapshot instead of local files
   --version <dv_...>      Drive version for --from-drive (default: current head)
 USAGE
@@ -80,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --ttl)          TTL="$2"; shift 2 ;;
     --client)       CLIENT="$2"; shift 2 ;;
     --spa)          SPA_MODE="true"; shift ;;
+    --cross-origin-isolation) CROSS_ORIGIN_ISOLATION="true"; shift ;;
     --from-drive)   FROM_DRIVE="$2"; shift 2 ;;
     --version)      DRIVE_VERSION="$2"; shift 2 ;;
     --help|-h)      usage 0 ;;
@@ -199,6 +202,7 @@ guess_content_type() {
     wav)      echo "audio/wav" ;;
     xml)      echo "application/xml" ;;
     woff2)    echo "font/woff2" ;;
+    wasm)     echo "application/wasm" ;;
     woff)     echo "font/woff" ;;
     ttf)      echo "font/ttf" ;;
     ico)      echo "image/x-icon" ;;
@@ -285,6 +289,10 @@ fi
 
 if [[ "$SPA_MODE" == "true" ]]; then
   BODY=$(echo "$BODY" | "$JQ_BIN" '.spaMode = true')
+fi
+
+if [[ "$CROSS_ORIGIN_ISOLATION" == "true" ]]; then
+  BODY=$(echo "$BODY" | "$JQ_BIN" '.crossOriginIsolation = true')
 fi
 
 # Freshness (R11, R12). A folder pulled with `account.sh pull` carries a stamp
