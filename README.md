@@ -67,3 +67,13 @@ scripts/verify-package.sh       # must exit 0 before you push
 | `hermes/productivity/sharenow/` | Hermes copy |
 
 MIT. [LICENSE](./LICENSE)
+
+## Statecharts for helpers
+
+The statechart skill maps product flows and services from TLA+ models to Mermaid and PNG charts. studio distributes it to every Box through its verified skills bundle. For other computers:
+
+```bash
+npx skills add AsyncFuncAI/sharenow --skill statechart -g -y
+```
+
+Ask your helper to use statechart explicitly. It includes the complete upstream scripts, tests, MIT license and source revision. First use needs Node and npm, plus mise or Java 11+ with a local TLC jar. See [statechart/UPSTREAM.md](statechart/UPSTREAM.md).

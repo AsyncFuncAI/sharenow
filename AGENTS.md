@@ -77,3 +77,7 @@ curl -s https://sharenow.today/.well-known/skills/index.json
   scripts lint clean, the manifests are valid JSON, and no brand violations exist.
 - House rules for everything shipped here: no em-dash, and no references to any
   other hosting product. The product is sharenow.
+
+## Additional shared skills
+
+Statechart is maintained once in `statechart/`, vendored unchanged from cursor/plugins with its MIT license and pinned revision in `UPSTREAM.md`. `scripts/build-layouts.sh` generates its skills, Hermes and plugin discovery folders too. Never hand-edit those generated copies. Run `node --test statechart/scripts/test/*.test.mjs` and the package gate before shipping.

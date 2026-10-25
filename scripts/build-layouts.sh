@@ -19,6 +19,13 @@ SKILL_LAYOUTS=(
   "$REPO_ROOT/plugins/sharenow/skills/sharenow"
 )
 
+# Additional canonical skills share every supported discovery layout.
+STATECHART_LAYOUTS=(
+  "$REPO_ROOT/skills/statechart"
+  "$REPO_ROOT/hermes/productivity/statechart"
+  "$REPO_ROOT/plugins/sharenow/skills/statechart"
+)
+
 # Plugin-manifest dirs that reference assets/logo.svg relative to themselves.
 # The manifest JSON is authored directly (not generated); only the logo asset
 # is synced here so the manifest's logo path resolves.
@@ -55,6 +62,16 @@ sync_manifest_logo() {
   mkdir -p "$dir/assets"
   cp -p "$CANONICAL/assets/logo.svg" "$dir/assets/logo.svg"
 }
+
+# Generate/check statechart separately so sharenow keeps its existing source.
+for target in "${STATECHART_LAYOUTS[@]}"; do
+  if [[ "$MODE" == "build" ]]; then
+    mkdir -p "$target"
+    cp -Rp "$REPO_ROOT/statechart/." "$target/"
+  elif ! diff -r -x '.DS_Store' "$REPO_ROOT/statechart" "$target" >/dev/null 2>&1; then
+    die "statechart layout drift: $target (run scripts/build-layouts.sh)"
+  fi
+done
 
 if [[ "$MODE" == "build" ]]; then
   for target in "${SKILL_LAYOUTS[@]+"${SKILL_LAYOUTS[@]}"}"; do
